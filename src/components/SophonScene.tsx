@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useImperativeHandle, forwardRef } from "react";
 import * as THREE from "three";
 import {
   SOPHON_COUNT,
@@ -34,14 +34,26 @@ const LOD_SHOW_DIST = 150;
 const LOD_FULL_DIST = 60;
 const SPHERE_RADIUS = 3;
 
+export interface SophonSceneHandle {
+  triggerClaim: (index: number) => void;
+}
+
 interface SophonSceneProps {
   onSophonClick?: (index: number) => void;
 }
 
-export default function SophonScene({ onSophonClick }: SophonSceneProps) {
+const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
+  function SophonScene({ onSophonClick }, ref) {
   const containerRef = useRef<HTMLDivElement>(null);
   const onSophonClickRef = useRef(onSophonClick);
   onSophonClickRef.current = onSophonClick;
+  const claimQueueRef = useRef<number[]>([]);
+
+  useImperativeHandle(ref, () => ({
+    triggerClaim: (index: number) => {
+      claimQueueRef.current.push(index);
+    },
+  }));
 
   useEffect(() => {
     const container = containerRef.current;
@@ -263,6 +275,25 @@ export default function SophonScene({ onSophonClick }: SophonSceneProps) {
     let flyProgress = 0;
     const positions = sophonData.positions;
 
+    // --- Claim animation state ---
+    let claimAnimIdx = -1;
+    let claimAnimProgress = -1;
+    let claimCenter = new THREE.Vector3();
+
+    // Light burst ring for claim animation
+    const ringGeo = new THREE.RingGeometry(0.5, 1, 32);
+    const ringMat = new THREE.MeshBasicMaterial({
+      color: 0x88ccff,
+      transparent: true,
+      opacity: 0,
+      side: THREE.DoubleSide,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    const ringMesh = new THREE.Mesh(ringGeo, ringMat);
+    ringMesh.visible = false;
+    scene.add(ringMesh);
+
     // --- Animation loop ---
     let animationId: number;
     let frameCount = 0;
@@ -349,6 +380,59 @@ export default function SophonScene({ onSophonClick }: SophonSceneProps) {
         pointLight.position.copy(camera.position);
       }
 
+      // --- Claim animation ---
+      if (claimAnimProgress < 0 && claimQueueRef.current.length > 0) {
+        claimAnimIdx = claimQueueRef.current.shift()!;
+        claimAnimProgress = 0;
+        const ci = claimAnimIdx * 3;
+        claimCenter.set(positions[ci], positions[ci + 1], positions[ci + 2]);
+        ringMesh.visible = true;
+        ringMesh.position.copy(claimCenter);
+      }
+
+      if (claimAnimProgress >= 0 && claimAnimProgress <= 1) {
+        claimAnimProgress += 0.012;
+        const p = Math.min(claimAnimProgress, 1);
+
+        // Brighten claimed sophon color
+        const ci = claimAnimIdx * 3;
+        const glow = Math.min(p * 3, 1);
+        sophonData.colors[ci] = 0.6 + 0.4 * glow;
+        sophonData.colors[ci + 1] = 0.75 + 0.25 * glow;
+        sophonData.colors[ci + 2] = 1.0;
+        sophonGeometry.attributes.color.needsUpdate = true;
+
+        // Expand light ring
+        const ringScale = p * 60;
+        ringMesh.scale.set(ringScale, ringScale, ringScale);
+        ringMesh.lookAt(camera.position);
+        ringMat.opacity = Math.max(0, 0.6 * (1 - p));
+
+        // Converge nearby particles toward claim center
+        if (p < 0.6) {
+          const convergeRadius = 80;
+          for (let i = 0; i < SOPHON_COUNT; i++) {
+            if (i === claimAnimIdx) continue;
+            const i3 = i * 3;
+            const dx = claimCenter.x - positions[i3];
+            const dy = claimCenter.y - positions[i3 + 1];
+            const dz = claimCenter.z - positions[i3 + 2];
+            const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+            if (dist < convergeRadius && dist > 1) {
+              const pull = (1 - dist / convergeRadius) * 0.3 * (1 - p / 0.6);
+              positions[i3] += (dx / dist) * pull;
+              positions[i3 + 1] += (dy / dist) * pull;
+              positions[i3 + 2] += (dz / dist) * pull;
+            }
+          }
+        }
+
+        if (p >= 1) {
+          claimAnimProgress = -1;
+          ringMesh.visible = false;
+        }
+      }
+
       // --- Fly-to animation ---
       if (flyTarget) {
         flyProgress += 0.03;
@@ -390,9 +474,13 @@ export default function SophonScene({ onSophonClick }: SophonSceneProps) {
       dustGlow.dispose();
       sphereGeo.dispose();
       sphereMat.dispose();
+      ringGeo.dispose();
+      ringMat.dispose();
       container.removeChild(renderer.domElement);
     };
   }, []);
 
   return <div ref={containerRef} className="w-full h-full" />;
-}
+});
+
+export default SophonScene;

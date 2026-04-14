@@ -1,8 +1,9 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useRef } from "react";
 import dynamic from "next/dynamic";
 import SophonSidebar from "@/components/SophonSidebar";
+import type { SophonSceneHandle } from "@/components/SophonScene";
 
 const SophonScene = dynamic(() => import("@/components/SophonScene"), {
   ssr: false,
@@ -17,6 +18,8 @@ const DEMO_CLAIMED = [
 ];
 
 export default function Home() {
+  const sceneRef = useRef<SophonSceneHandle>(null);
+
   const [selectedSophon, setSelectedSophon] = useState<{
     index: number;
     claimed: boolean;
@@ -35,6 +38,7 @@ export default function Home() {
   }, []);
 
   const handleClaim = useCallback((index: number) => {
+    sceneRef.current?.triggerClaim(index);
     setSelectedSophon({
       index,
       claimed: true,
@@ -44,7 +48,7 @@ export default function Home() {
 
   return (
     <main className="w-screen h-screen">
-      <SophonScene onSophonClick={handleSophonClick} />
+      <SophonScene ref={sceneRef} onSophonClick={handleSophonClick} />
       <SophonSidebar
         sophon={selectedSophon}
         onClose={handleClose}
