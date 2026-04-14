@@ -67,13 +67,13 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
     renderer.setPixelRatio(window.devicePixelRatio);
     renderer.setSize(window.innerWidth, window.innerHeight);
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.8;
+    renderer.toneMappingExposure = 2.0;
     container.appendChild(renderer.domElement);
 
     // --- Scene & Camera ---
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x020510);
-    scene.fog = new THREE.FogExp2(0x020510, 0.0008);
+    scene.fog = new THREE.FogExp2(0x020510, 0.0006);
 
     const camera = new THREE.PerspectiveCamera(
       60,
@@ -96,11 +96,11 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
 
     const glowTex = createGlowTexture(64, 0.15);
     const sophonMaterial = new THREE.PointsMaterial({
-      size: 6,
+      size: 7,
       map: glowTex,
       vertexColors: true,
       transparent: true,
-      opacity: 0.9,
+      opacity: 1.0,
       blending: THREE.AdditiveBlending,
       depthWrite: false,
       sizeAttenuation: true,
@@ -117,11 +117,11 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
     );
     const dustGlow = createGlowTexture(32, 0.3);
     const dustMaterial = new THREE.PointsMaterial({
-      size: 1.5,
+      size: 1.8,
       map: dustGlow,
-      color: 0x4466aa,
+      color: 0x6688cc,
       transparent: true,
-      opacity: 0.35,
+      opacity: 0.5,
       blending: THREE.AdditiveBlending,
       depthWrite: false,
       sizeAttenuation: true,
@@ -136,6 +136,9 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
     new RGBELoader().load("/envmap.hdr", (hdrTexture) => {
       const envMap = pmremGenerator.fromEquirectangular(hdrTexture).texture;
       scene.environment = envMap;
+      scene.background = envMap;
+      scene.backgroundIntensity = 0.35;
+      scene.backgroundBlurriness = 0.1;
       sphereMat.envMap = envMap;
       sphereMat.needsUpdate = true;
       hdrTexture.dispose();

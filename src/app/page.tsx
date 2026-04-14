@@ -4,6 +4,7 @@ import { useState, useCallback, useRef } from "react";
 import dynamic from "next/dynamic";
 import SophonSidebar from "@/components/SophonSidebar";
 import EtchPanel from "@/components/EtchPanel";
+import EntryHint from "@/components/EntryHint";
 import type { SophonSceneHandle } from "@/components/SophonScene";
 
 const SophonScene = dynamic(() => import("@/components/SophonScene"), {
@@ -74,6 +75,7 @@ export default function Home() {
   return (
     <main className="w-screen h-screen">
       <SophonScene ref={sceneRef} onSophonClick={handleSophonClick} />
+      <EntryHint />
       <SophonSidebar
         sophon={selectedSophon}
         onClose={handleClose}
