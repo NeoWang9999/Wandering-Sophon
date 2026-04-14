@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useImperativeHandle, forwardRef } from "react";
+import { useEffect, useRef, useState, useImperativeHandle, forwardRef } from "react";
 import * as THREE from "three";
 import { RGBELoader } from "three/addons/loaders/RGBELoader.js";
 import {
@@ -49,6 +49,8 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
   const onSophonClickRef = useRef(onSophonClick);
   onSophonClickRef.current = onSophonClick;
   const claimQueueRef = useRef<number[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [fadeOut, setFadeOut] = useState(false);
 
   useImperativeHandle(ref, () => ({
     triggerClaim: (index: number) => {
@@ -72,8 +74,6 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
 
     // --- Scene & Camera ---
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x020510);
-    scene.fog = new THREE.FogExp2(0x020510, 0.0006);
 
     const camera = new THREE.PerspectiveCamera(
       60,
@@ -133,16 +133,20 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
     const pmremGenerator = new THREE.PMREMGenerator(renderer);
     pmremGenerator.compileEquirectangularShader();
 
+    let hdrReady = false;
     new RGBELoader().load("/envmap.hdr", (hdrTexture) => {
       const envMap = pmremGenerator.fromEquirectangular(hdrTexture).texture;
       scene.environment = envMap;
       scene.background = envMap;
       scene.backgroundIntensity = 0.35;
-      scene.backgroundBlurriness = 0.1;
+      scene.backgroundBlurriness = 0;
       sphereMat.envMap = envMap;
       sphereMat.needsUpdate = true;
       hdrTexture.dispose();
       pmremGenerator.dispose();
+      hdrReady = true;
+      setFadeOut(true);
+      setTimeout(() => setLoading(false), 1200);
     });
 
     // --- LOD: Instanced sphere meshes (visible when zoomed in) ---
@@ -334,6 +338,7 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
 
     const animate = () => {
       animationId = requestAnimationFrame(animate);
+      if (!hdrReady) return;
       frameCount++;
 
       const camDist = camera.position.length();
@@ -514,7 +519,32 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
     };
   }, []);
 
-  return <div ref={containerRef} className="w-full h-full" />;
+  return (
+    <div className="w-full h-full relative">
+      <div ref={containerRef} className="w-full h-full" />
+      <div className="absolute bottom-16 left-0 right-0 z-[60] pointer-events-none text-center">
+        <div className={`text-white/30 text-sm tracking-[0.3em] mb-3 transition-opacity duration-[3s] ${fadeOut ? "opacity-0" : "opacity-100"}`}>
+          流浪智子
+        </div>
+        <div className="text-white/20 text-xs tracking-widest">
+          滚轮缩放 · 拖拽旋转 · 点击探索
+        </div>
+      </div>
+      {loading && (
+        <div
+          className={`absolute inset-0 z-50 flex items-center justify-center transition-opacity duration-1000 ${
+            fadeOut ? "opacity-0 pointer-events-none" : "opacity-100"
+          }`}
+          style={{
+            background:
+              "radial-gradient(ellipse at center, #000e3963 0%, #080808 40%, #030303 100%)",
+          }}
+        >
+          <div className="loading-glow w-16 h-16 rounded-full" />
+        </div>
+      )}
+    </div>
+  );
 });
 
 export default SophonScene;
