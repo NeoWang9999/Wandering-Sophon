@@ -4,7 +4,7 @@ import { useEffect, useRef, useState, useImperativeHandle, forwardRef } from "re
 import * as THREE from "three/webgpu";
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore - three/tsl types incomplete for r172 WebGPU TSL
-import { storage, instanceIndex, Fn, float, vec3, vec4, uniform, hash, uint, mod, texture as tslTexture, uv } from "three/tsl";
+import { storage, instanceIndex, Fn, float, vec3, vec4, uniform, uniformArray, hash, uint, mod, texture as tslTexture, uv, Loop } from "three/tsl";
 import { RGBELoader } from "three/addons/loaders/RGBELoader.js";
 import {
   SOPHON_COUNT,
@@ -98,53 +98,79 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
     const sophonPosBuffer = storage(posAttr, "vec3", SOPHON_COUNT);
     const sophonVelBuffer = storage(velAttr, "vec3", SOPHON_COUNT);
 
+    // --- Permanent ambient attractors (create fluid flow) ---
+    const AMBIENT_COUNT = 3;
+    const ambientPositions = uniformArray([
+      new THREE.Vector3(-200, 80, -150),
+      new THREE.Vector3(180, -60, 200),
+      new THREE.Vector3(50, 150, -100),
+    ]);
+    const ambientAxes = uniformArray([
+      new THREE.Vector3(0.3, 0.9, 0.1).normalize(),
+      new THREE.Vector3(-0.5, 0.7, 0.4).normalize(),
+      new THREE.Vector3(0.2, -0.8, 0.6).normalize(),
+    ]);
+
     // Uniforms for compute
     const speedFactorU = uniform(1.0);
     const spaceSizeF = float(SPACE_SIZE);
     const mousePosU = uniform(new THREE.Vector3(0, 0, 0));
     const mouseRadiusF = float(80);
 
-    // Attractor uniforms (Shift+click)
+    // Shared physics params (direct force, no gravity constant)
+    const ambientMassU = uniform(8e3);
+    const spinStrengthU = uniform(2.5);
+    const velocityDampingU = uniform(0.08);
+    const maxSpeedU = uniform(35.0);
+
+    // Shift+click temporary attractor
     const attractorPosU = uniform(new THREE.Vector3(0, 0, 0));
     const attractorActiveU = uniform(0.0); // 0 = off, 1 = on
-    const attractorMassU = uniform(5e6);
-    const spinStrengthU = uniform(2.5);
-    const velocityDampingU = uniform(0.05);
-    const maxSpeedU = uniform(6.0);
+    const clickMassU = uniform(3e7);
 
-    // Update compute: velocity + mouse repulsion + attractor + boundary wrap
+    // Update compute
     const updateSophons = Fn(() => {
+      const delta = float(1.0 / 60.0);
       const pos = sophonPosBuffer.element(instanceIndex);
       const vel = sophonVelBuffer.element(instanceIndex);
 
-      // Attractor gravity + spinning force (when active)
-      const toAttractor = attractorPosU.sub(pos);
-      const aDist = toAttractor.length().max(0.5);
-      const aDir = toAttractor.normalize();
-      const gravityStrength = attractorMassU.div(aDist.mul(aDist));
-      const gravityForce = aDir.mul(gravityStrength).mul(attractorActiveU);
-      // Spinning: tilted axis for 3D orbital motion
-      const spinAxis = vec3(0.2, 0.9, 0.3);
-      const spinForce = spinAxis.cross(toAttractor).normalize().mul(gravityStrength).mul(spinStrengthU).mul(attractorActiveU);
-      vel.addAssign(gravityForce.add(spinForce).mul(float(1.0 / 60.0)));
+      const force = vec3(0.0).toVar();
 
-      // Always apply gentle damping (stronger when attractor active)
-      const baseDamping = float(0.003);
-      const activeDamping = velocityDampingU.mul(attractorActiveU);
-      vel.mulAssign(float(1.0).sub(baseDamping.add(activeDamping)));
+      // Ambient attractors (always active → fluid flow)
+      Loop(AMBIENT_COUNT, ({ i }: { i: any }) => {
+        const aPos = ambientPositions.element(i);
+        const aAxis = ambientAxes.element(i);
+        const toA = aPos.sub(pos);
+        const aDist = toA.length().max(5.0);
+        const aDir = toA.normalize();
+        const gStr = ambientMassU.div(aDist.mul(aDist));
+        force.addAssign(aDir.mul(gStr));
+        force.addAssign(aAxis.mul(gStr).mul(spinStrengthU).cross(toA));
+      });
 
-      // Clamp speed
+      // Shift+click attractor (temporary, much stronger)
+      const toClick = attractorPosU.sub(pos);
+      const cDist = toClick.length().max(0.5);
+      const cDir = toClick.normalize();
+      const cStr = clickMassU.div(cDist.mul(cDist)).mul(attractorActiveU);
+      force.addAssign(cDir.mul(cStr));
+      const clickSpin = vec3(0.2, 0.9, 0.3);
+      force.addAssign(clickSpin.mul(cStr).mul(spinStrengthU).cross(toClick));
+
+      // Apply force → velocity
+      vel.addAssign(force.mul(delta));
       const speed = vel.length();
       vel.assign(vel.normalize().mul(speed.min(maxSpeedU)));
+      vel.mulAssign(float(1.0).sub(velocityDampingU));
 
-      // Apply velocity
+      // Apply velocity → position (speedFactor slows when zoomed in)
       pos.addAssign(vel.mul(speedFactorU));
 
       // Mouse repulsion
       const toMouse = pos.sub(mousePosU);
       const dist = toMouse.length();
-      const force = float(1.0).sub(dist.div(mouseRadiusF)).max(0.0).mul(0.5);
-      pos.addAssign(toMouse.normalize().mul(force));
+      const mForce = float(1.0).sub(dist.div(mouseRadiusF)).max(0.0).mul(0.5);
+      pos.addAssign(toMouse.normalize().mul(mForce));
 
       // Boundary wrap
       const halfSpace = spaceSizeF.div(2.0);
@@ -163,15 +189,8 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
     sophonMaterial.positionNode = sophonPosBuffer.toAttribute();
     sophonMaterial.colorNode = Fn(() => {
       const glow = tslTexture(glowTex, uv());
-      const vel = sophonVelBuffer.toAttribute();
-      const speed = vel.length();
-      const colorMix = speed.div(maxSpeedU).smoothstep(0.0, 0.5);
-      // Cool blue at rest → warm orange when fast
-      const coolCol = vec3(0.4, 0.65, 1.0);
-      const hotCol = vec3(1.0, 0.65, 0.35);
       const brightness = hash(instanceIndex.add(uint(42))).mul(0.3).add(0.7);
-      const col = hotCol.mix(coolCol, colorMix).mul(brightness);
-      return vec4(col.mul(glow.rgb), glow.a);
+      return vec4(vec3(brightness).mul(glow.rgb), glow.a);
     })();
     sophonMaterial.scaleNode = particleScale;
     const sophonGeo = new THREE.PlaneGeometry(1, 1);
@@ -427,7 +446,7 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
       const camDist = camera.position.length();
 
       // Update GPU compute uniforms
-      speedFactorU.value = THREE.MathUtils.clamp(camDist / 1500, 0.02, 1);
+      speedFactorU.value = THREE.MathUtils.clamp(camDist / 1500, 0.15, 1);
       mousePosU.value.copy(mouse3D);
       if (shiftAttractorActive) attractorPosU.value.copy(mouse3D);
 
