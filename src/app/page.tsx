@@ -3,6 +3,7 @@
 import { useState, useCallback, useRef } from "react";
 import dynamic from "next/dynamic";
 import SophonSidebar from "@/components/SophonSidebar";
+import EtchPanel from "@/components/EtchPanel";
 import type { SophonSceneHandle } from "@/components/SophonScene";
 
 const SophonScene = dynamic(() => import("@/components/SophonScene"), {
@@ -26,6 +27,8 @@ export default function Home() {
     nickname: string;
   } | null>(null);
 
+  const [etchingIndex, setEtchingIndex] = useState<number | null>(null);
+
   const handleSophonClick = useCallback((index: number) => {
     const demo = DEMO_CLAIMED.find((d) => d.index === index);
     setSelectedSophon(
@@ -46,6 +49,28 @@ export default function Home() {
     });
   }, []);
 
+  const handleEtch = useCallback((index: number) => {
+    setEtchingIndex(index);
+  }, []);
+
+  const handleEtchSave = useCallback(
+    (data: { nickname: string; bio: string; links: string[] }) => {
+      if (etchingIndex !== null) {
+        setSelectedSophon({
+          index: etchingIndex,
+          claimed: true,
+          nickname: data.nickname || "匿名旅行者",
+        });
+      }
+      setEtchingIndex(null);
+    },
+    [etchingIndex]
+  );
+
+  const handleEtchClose = useCallback(() => {
+    setEtchingIndex(null);
+  }, []);
+
   return (
     <main className="w-screen h-screen">
       <SophonScene ref={sceneRef} onSophonClick={handleSophonClick} />
@@ -53,7 +78,16 @@ export default function Home() {
         sophon={selectedSophon}
         onClose={handleClose}
         onClaim={handleClaim}
+        onEtch={handleEtch}
       />
+      {etchingIndex !== null && (
+        <EtchPanel
+          sophonIndex={etchingIndex}
+          initialNickname={selectedSophon?.nickname ?? ""}
+          onSave={handleEtchSave}
+          onClose={handleEtchClose}
+        />
+      )}
     </main>
   );
 }

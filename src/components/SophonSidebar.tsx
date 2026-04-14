@@ -10,12 +10,14 @@ interface SophonSidebarProps {
   sophon: SophonInfo | null;
   onClose: () => void;
   onClaim: (index: number) => void;
+  onEtch?: (index: number) => void;
 }
 
 export default function SophonSidebar({
   sophon,
   onClose,
   onClaim,
+  onEtch,
 }: SophonSidebarProps) {
   if (!sophon) return null;
 
@@ -52,6 +54,15 @@ export default function SophonSidebar({
           <div className="text-sm text-white/70 leading-relaxed">
             这颗智子已被认领，蚀刻内容将在此展示。
           </div>
+
+          {onEtch && (
+            <button
+              onClick={() => onEtch(sophon.index)}
+              className="mt-6 w-full py-3 rounded-lg bg-white/5 border border-white/10 text-white/60 hover:text-white hover:border-white/20 transition-all cursor-pointer text-sm tracking-wide"
+            >
+              编辑蚀刻
+            </button>
+          )}
         </div>
       ) : (
         <div className="mt-6 flex-1 flex flex-col">
