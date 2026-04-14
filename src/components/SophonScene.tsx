@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useImperativeHandle, forwardRef } from "react";
 import * as THREE from "three";
+import { RGBELoader } from "three/addons/loaders/RGBELoader.js";
 import {
   SOPHON_COUNT,
   DUST_COUNT,
@@ -65,6 +66,8 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setPixelRatio(window.devicePixelRatio);
     renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.8;
     container.appendChild(renderer.domElement);
 
     // --- Scene & Camera ---
@@ -126,14 +129,31 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
     const dustPoints = new THREE.Points(dustGeometry, dustMaterial);
     scene.add(dustPoints);
 
+    // --- Load HDR environment map ---
+    const pmremGenerator = new THREE.PMREMGenerator(renderer);
+    pmremGenerator.compileEquirectangularShader();
+
+    new RGBELoader().load("/envmap.hdr", (hdrTexture) => {
+      const envMap = pmremGenerator.fromEquirectangular(hdrTexture).texture;
+      scene.environment = envMap;
+      sphereMat.envMap = envMap;
+      sphereMat.needsUpdate = true;
+      hdrTexture.dispose();
+      pmremGenerator.dispose();
+    });
+
     // --- LOD: Instanced sphere meshes (visible when zoomed in) ---
-    const sphereGeo = new THREE.SphereGeometry(SPHERE_RADIUS, 24, 16);
-    const sphereMat = new THREE.MeshStandardMaterial({
-      color: 0x88aaee,
-      metalness: 0.85,
-      roughness: 0.2,
-      emissive: 0x223355,
-      emissiveIntensity: 0.4,
+    const sphereGeo = new THREE.SphereGeometry(SPHERE_RADIUS, 32, 24);
+    const sphereMat = new THREE.MeshPhysicalMaterial({
+      color: 0xddeeff,
+      metalness: 1.0,
+      roughness: 0.03,
+      clearcoat: 1.0,
+      clearcoatRoughness: 0.02,
+      reflectivity: 1.0,
+      envMapIntensity: 15.0,
+      emissive: 0x223344,
+      emissiveIntensity: 0.15,
       transparent: true,
       opacity: 0,
     });
@@ -149,10 +169,21 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
     const _dummy = new THREE.Object3D();
 
     // --- Lighting (for sphere LOD) ---
-    const ambient = new THREE.AmbientLight(0x334466, 0.6);
+    const ambient = new THREE.AmbientLight(0x556688, 1.0);
     scene.add(ambient);
-    const pointLight = new THREE.PointLight(0x6688cc, 2, 500);
+    const pointLight = new THREE.PointLight(0xaaccff, 4, 500);
     scene.add(pointLight);
+
+    // Strong directional lights for specular highlights on spheres
+    const dirLight1 = new THREE.DirectionalLight(0xffffff, 5);
+    dirLight1.position.set(1, 1, 1);
+    scene.add(dirLight1);
+    const dirLight2 = new THREE.DirectionalLight(0x8899cc, 3);
+    dirLight2.position.set(-1, -0.5, -1);
+    scene.add(dirLight2);
+    const dirLight3 = new THREE.DirectionalLight(0xffffff, 2);
+    dirLight3.position.set(0, -1, 0.5);
+    scene.add(dirLight3);
 
     // --- Mouse tracking ---
     const mouse = new THREE.Vector2(0, 0);

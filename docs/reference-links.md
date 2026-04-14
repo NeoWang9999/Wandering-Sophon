@@ -7,3 +7,4 @@
 | WebGPU 吸引子粒子 | https://threejs.org/examples/?q=par#webgpu_tsl_compute_attractors_particles | 智子自由流动效果 |
 | WebGL 流体粒子交互 | https://threejs.org/examples/?q=fluid#webgl_gpgpu_water | 展开蚀刻时的自由交互 |
 | 鼠标扰动粒子demo | https://threejs.org/examples/?q=particle#webgpu_compute_particles_fluid | 智子流的鼠标交互效果 |
+| PBR材质效果 | https://threejs.org/examples/#webgl_materials_physical_clearcoat | 智子的材质 |
