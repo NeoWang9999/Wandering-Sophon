@@ -2,6 +2,9 @@
 
 import { useEffect, useRef, useState, useImperativeHandle, forwardRef } from "react";
 import * as THREE from "three/webgpu";
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore - three/tsl types incomplete for r172 WebGPU TSL
+import { storage, instanceIndex, Fn, float, vec3, vec4, uniform, hash, uint, mod, texture as tslTexture, uv } from "three/tsl";
 import { RGBELoader } from "three/addons/loaders/RGBELoader.js";
 import {
   SOPHON_COUNT,
@@ -86,51 +89,82 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
     );
     camera.position.set(0, 0, 500);
 
-    // --- Sophon point particles ---
-    const sophonGeometry = new THREE.BufferGeometry();
-    sophonGeometry.setAttribute(
-      "position",
-      new THREE.BufferAttribute(sophonData.positions, 3)
-    );
-    sophonGeometry.setAttribute(
-      "color",
-      new THREE.BufferAttribute(sophonData.colors, 3)
-    );
+    // --- GPU Sophon particle system (pre-filled from CPU data) ---
+    const SBA = (THREE as any).StorageInstancedBufferAttribute;
+    const posAttr = new SBA(SOPHON_COUNT, 3);
+    (posAttr.array as Float32Array).set(sophonData.positions);
+    const velAttr = new SBA(SOPHON_COUNT, 3);
+    (velAttr.array as Float32Array).set(sophonData.velocities);
+    const sophonPosBuffer = storage(posAttr, "vec3", SOPHON_COUNT);
+    const sophonVelBuffer = storage(velAttr, "vec3", SOPHON_COUNT);
 
+    // Uniforms for compute
+    const speedFactorU = uniform(1.0);
+    const spaceSizeF = float(SPACE_SIZE);
+    const mousePosU = uniform(new THREE.Vector3(0, 0, 0));
+    const mouseRadiusF = float(80);
+
+    // Update compute: apply velocity + mouse repulsion + boundary wrap
+    const updateSophons = Fn(() => {
+      const pos = sophonPosBuffer.element(instanceIndex);
+      const vel = sophonVelBuffer.element(instanceIndex);
+
+      // Apply velocity
+      pos.addAssign(vel.mul(speedFactorU));
+
+      // Mouse repulsion
+      const toMouse = pos.sub(mousePosU);
+      const dist = toMouse.length();
+      const force = float(1.0).sub(dist.div(mouseRadiusF)).max(0.0).mul(0.5);
+      pos.addAssign(toMouse.normalize().mul(force));
+
+      // Boundary wrap
+      const halfSpace = spaceSizeF.div(2.0);
+      pos.assign(mod(pos.add(halfSpace), spaceSizeF).sub(halfSpace));
+    });
+    const updateCompute = updateSophons().compute(SOPHON_COUNT);
+
+    // Sophon sprite material
     const glowTex = createGlowTexture(64, 0.15);
-    const sophonMaterial = new THREE.PointsMaterial({
-      size: 7,
-      map: glowTex,
-      vertexColors: true,
+    const particleScale = uniform(4.0);
+    const sophonMaterial = new (THREE as any).SpriteNodeMaterial({
       transparent: true,
-      opacity: 1.0,
       blending: THREE.AdditiveBlending,
       depthWrite: false,
-      sizeAttenuation: true,
     });
-    const sophonPoints = new THREE.Points(sophonGeometry, sophonMaterial);
-    scene.add(sophonPoints);
+    sophonMaterial.positionNode = sophonPosBuffer.toAttribute();
+    sophonMaterial.colorNode = Fn(() => {
+      const glow = tslTexture(glowTex, uv());
+      const brightness = hash(instanceIndex.add(uint(42))).mul(0.5).add(0.5);
+      const col = vec3(float(0.6).mul(brightness), float(0.75).mul(brightness), brightness);
+      return vec4(col.mul(glow.rgb), glow.a);
+    })();
+    sophonMaterial.scaleNode = particleScale;
+    const sophonGeo = new THREE.PlaneGeometry(1, 1);
+    const sophonMesh = new THREE.InstancedMesh(sophonGeo, sophonMaterial, SOPHON_COUNT);
+    scene.add(sophonMesh);
 
-    // --- Dust particles ---
+    // --- Dust particle system (static, pre-filled) ---
     const dustPositions = createDustPositions();
-    const dustGeometry = new THREE.BufferGeometry();
-    dustGeometry.setAttribute(
-      "position",
-      new THREE.BufferAttribute(dustPositions, 3)
-    );
+    const dustPosAttr = new SBA(DUST_COUNT, 3);
+    (dustPosAttr.array as Float32Array).set(dustPositions);
+    const dustPosBuffer = storage(dustPosAttr, "vec3", DUST_COUNT);
+
     const dustGlow = createGlowTexture(32, 0.3);
-    const dustMaterial = new THREE.PointsMaterial({
-      size: 1.8,
-      map: dustGlow,
-      color: 0x6688cc,
+    const dustMaterial = new (THREE as any).SpriteNodeMaterial({
       transparent: true,
-      opacity: 0.5,
       blending: THREE.AdditiveBlending,
       depthWrite: false,
-      sizeAttenuation: true,
     });
-    const dustPoints = new THREE.Points(dustGeometry, dustMaterial);
-    scene.add(dustPoints);
+    dustMaterial.positionNode = dustPosBuffer.toAttribute();
+    dustMaterial.colorNode = Fn(() => {
+      const glow = tslTexture(dustGlow, uv());
+      return vec4(vec3(0.4, 0.53, 0.8).mul(glow.rgb), glow.a.mul(0.5));
+    })();
+    dustMaterial.scaleNode = float(1.5);
+    const dustGeo = new THREE.PlaneGeometry(1, 1);
+    const dustMesh = new THREE.InstancedMesh(dustGeo, dustMaterial, DUST_COUNT);
+    scene.add(dustMesh);
 
     // --- Load HDR environment map ---
     const pmremGenerator = new THREE.PMREMGenerator(renderer);
@@ -343,41 +377,30 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
       frameCount++;
 
       const camDist = camera.position.length();
-      const speedFactor = THREE.MathUtils.clamp(camDist / 1500, 0.02, 1);
-      const half = SPACE_SIZE / 2;
 
-      // Update particle positions
+      // Update GPU compute uniforms
+      speedFactorU.value = THREE.MathUtils.clamp(camDist / 1500, 0.02, 1);
+      mousePosU.value.copy(mouse3D);
+
+      // GPU particle compute
+      renderer.compute(updateCompute);
+
+      // CPU shadow position update (for click detection & LOD)
+      const sf = speedFactorU.value;
+      const half = SPACE_SIZE / 2;
       for (let i = 0; i < SOPHON_COUNT; i++) {
         const i3 = i * 3;
-        positions[i3] += sophonData.velocities[i3] * speedFactor;
-        positions[i3 + 1] += sophonData.velocities[i3 + 1] * speedFactor;
-        positions[i3 + 2] += sophonData.velocities[i3 + 2] * speedFactor;
-
-        // Mouse repulsion
-        const dx = positions[i3] - mouse3D.x;
-        const dy = positions[i3 + 1] - mouse3D.y;
-        const dz = positions[i3 + 2] - mouse3D.z;
-        const distSq = dx * dx + dy * dy + dz * dz;
-        const mouseRadius = 80;
-        if (distSq < mouseRadius * mouseRadius && distSq > 0.01) {
-          const dist = Math.sqrt(distSq);
-          const force = (1 - dist / mouseRadius) * 0.5;
-          positions[i3] += (dx / dist) * force;
-          positions[i3 + 1] += (dy / dist) * force;
-          positions[i3 + 2] += (dz / dist) * force;
-        }
-
-        // Wrap
+        positions[i3] += sophonData.velocities[i3] * sf;
+        positions[i3 + 1] += sophonData.velocities[i3 + 1] * sf;
+        positions[i3 + 2] += sophonData.velocities[i3 + 2] * sf;
         for (let j = 0; j < 3; j++) {
           if (positions[i3 + j] > half) positions[i3 + j] -= SPACE_SIZE;
           if (positions[i3 + j] < -half) positions[i3 + j] += SPACE_SIZE;
         }
       }
 
-      sophonGeometry.attributes.position.needsUpdate = true;
-
-      // Dynamic point size
-      sophonMaterial.size = THREE.MathUtils.clamp(6 * (500 / camDist), 2, 30);
+      // Dynamic sprite scale
+      particleScale.value = THREE.MathUtils.clamp(4 * (500 / camDist), 1, 20);
 
       // --- LOD: show sphere instances when zoomed in ---
       const showSpheres = camDist < LOD_SHOW_DIST;
@@ -434,38 +457,11 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
         claimAnimProgress += 0.012;
         const p = Math.min(claimAnimProgress, 1);
 
-        // Brighten claimed sophon color
-        const ci = claimAnimIdx * 3;
-        const glow = Math.min(p * 3, 1);
-        sophonData.colors[ci] = 0.6 + 0.4 * glow;
-        sophonData.colors[ci + 1] = 0.75 + 0.25 * glow;
-        sophonData.colors[ci + 2] = 1.0;
-        sophonGeometry.attributes.color.needsUpdate = true;
-
         // Expand light ring
         const ringScale = p * 60;
         ringMesh.scale.set(ringScale, ringScale, ringScale);
         ringMesh.lookAt(camera.position);
         ringMat.opacity = Math.max(0, 0.6 * (1 - p));
-
-        // Converge nearby particles toward claim center
-        if (p < 0.6) {
-          const convergeRadius = 80;
-          for (let i = 0; i < SOPHON_COUNT; i++) {
-            if (i === claimAnimIdx) continue;
-            const i3 = i * 3;
-            const dx = claimCenter.x - positions[i3];
-            const dy = claimCenter.y - positions[i3 + 1];
-            const dz = claimCenter.z - positions[i3 + 2];
-            const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-            if (dist < convergeRadius && dist > 1) {
-              const pull = (1 - dist / convergeRadius) * 0.3 * (1 - p / 0.6);
-              positions[i3] += (dx / dist) * pull;
-              positions[i3 + 1] += (dy / dist) * pull;
-              positions[i3 + 2] += (dz / dist) * pull;
-            }
-          }
-        }
 
         if (p >= 1) {
           claimAnimProgress = -1;
@@ -509,10 +505,10 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
       renderer.domElement.removeEventListener("wheel", onWheel);
       renderer.domElement.removeEventListener("pointerdown", onPointerDown);
       renderer.dispose();
-      sophonGeometry.dispose();
+      sophonGeo.dispose();
       sophonMaterial.dispose();
       glowTex.dispose();
-      dustGeometry.dispose();
+      dustGeo.dispose();
       dustMaterial.dispose();
       dustGlow.dispose();
       sphereGeo.dispose();
