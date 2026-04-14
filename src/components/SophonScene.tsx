@@ -34,8 +34,14 @@ const LOD_SHOW_DIST = 150;
 const LOD_FULL_DIST = 60;
 const SPHERE_RADIUS = 3;
 
-export default function SophonScene() {
+interface SophonSceneProps {
+  onSophonClick?: (index: number) => void;
+}
+
+export default function SophonScene({ onSophonClick }: SophonSceneProps) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const onSophonClickRef = useRef(onSophonClick);
+  onSophonClickRef.current = onSophonClick;
 
   useEffect(() => {
     const container = containerRef.current;
@@ -168,11 +174,62 @@ export default function SophonScene() {
     let prevMouse = { x: 0, y: 0 };
     const spherical = new THREE.Spherical().setFromVector3(camera.position);
 
+    let pointerDownPos = { x: 0, y: 0 };
+
     const onPointerDown = (e: PointerEvent) => {
       isDragging = true;
       prevMouse = { x: e.clientX, y: e.clientY };
+      pointerDownPos = { x: e.clientX, y: e.clientY };
     };
-    const onPointerUp = () => {
+    const onPointerUp = (e: PointerEvent) => {
+      const dx = e.clientX - pointerDownPos.x;
+      const dy = e.clientY - pointerDownPos.y;
+      const moved = Math.sqrt(dx * dx + dy * dy);
+
+      if (moved < 5) {
+        // Click (not drag): find nearest sophon to click ray
+        const clickMouse = new THREE.Vector2(
+          (e.clientX / window.innerWidth) * 2 - 1,
+          -(e.clientY / window.innerHeight) * 2 + 1
+        );
+        const clickRay = new THREE.Raycaster();
+        clickRay.setFromCamera(clickMouse, camera);
+
+        let bestIdx = -1;
+        let bestDist = Infinity;
+        const clickThreshold = 20;
+        const _pos = new THREE.Vector3();
+
+        for (let i = 0; i < SOPHON_COUNT; i++) {
+          const i3 = i * 3;
+          _pos.set(positions[i3], positions[i3 + 1], positions[i3 + 2]);
+          const projected = _pos.clone().project(camera);
+          const screenDx = projected.x - clickMouse.x;
+          const screenDy = projected.y - clickMouse.y;
+          const screenDist = Math.sqrt(screenDx * screenDx + screenDy * screenDy);
+          const pixelDist = screenDist * window.innerWidth / 2;
+
+          if (projected.z > 0 && projected.z < 1 && pixelDist < clickThreshold && pixelDist < bestDist) {
+            bestDist = pixelDist;
+            bestIdx = i;
+          }
+        }
+
+        if (bestIdx >= 0) {
+          // Fly camera toward clicked sophon
+          const i3 = bestIdx * 3;
+          flyTarget = new THREE.Vector3(
+            positions[i3],
+            positions[i3 + 1],
+            positions[i3 + 2]
+          );
+          flyProgress = 0;
+          flyStartPos = camera.position.clone();
+
+          onSophonClickRef.current?.(bestIdx);
+        }
+      }
+
       isDragging = false;
     };
     const onPointerMove = (e: PointerEvent) => {
@@ -200,6 +257,12 @@ export default function SophonScene() {
     };
     window.addEventListener("resize", onResize);
 
+    // --- Fly-to animation state ---
+    let flyTarget: THREE.Vector3 | null = null;
+    let flyStartPos = new THREE.Vector3();
+    let flyProgress = 0;
+    const positions = sophonData.positions;
+
     // --- Animation loop ---
     let animationId: number;
     let frameCount = 0;
@@ -208,7 +271,6 @@ export default function SophonScene() {
       animationId = requestAnimationFrame(animate);
       frameCount++;
 
-      const positions = sophonData.positions;
       const camDist = camera.position.length();
       const speedFactor = THREE.MathUtils.clamp(camDist / 1500, 0.02, 1);
       const half = SPACE_SIZE / 2;
@@ -287,7 +349,24 @@ export default function SophonScene() {
         pointLight.position.copy(camera.position);
       }
 
-      camera.lookAt(0, 0, 0);
+      // --- Fly-to animation ---
+      if (flyTarget) {
+        flyProgress += 0.03;
+        const currentFlyTarget = flyTarget;
+        if (flyProgress >= 1) {
+          flyProgress = 1;
+          flyTarget = null;
+        }
+        const t = flyProgress * flyProgress * (3 - 2 * flyProgress); // smoothstep
+        const targetCamPos = currentFlyTarget.clone().add(
+          new THREE.Vector3(0, 5, 25)
+        );
+        camera.position.lerpVectors(flyStartPos, targetCamPos, t);
+        camera.lookAt(currentFlyTarget);
+      } else {
+        camera.lookAt(0, 0, 0);
+      }
+
       renderer.render(scene, camera);
     };
 
