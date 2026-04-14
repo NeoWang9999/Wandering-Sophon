@@ -6,6 +6,27 @@ import * as THREE from "three";
 const SOPHON_COUNT = 2000;
 const DUST_COUNT = 8000;
 
+function createGlowTexture(size: number, coreRatio: number): THREE.Texture {
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext("2d")!;
+  const half = size / 2;
+
+  const gradient = ctx.createRadialGradient(half, half, 0, half, half, half);
+  gradient.addColorStop(0, "rgba(255,255,255,1)");
+  gradient.addColorStop(coreRatio, "rgba(180,210,255,0.6)");
+  gradient.addColorStop(0.5, "rgba(100,150,255,0.15)");
+  gradient.addColorStop(1, "rgba(0,0,0,0)");
+
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, size, size);
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.needsUpdate = true;
+  return texture;
+}
+
 export default function SophonScene() {
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -21,7 +42,8 @@ export default function SophonScene() {
 
     // --- Scene & Camera ---
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x000008);
+    scene.background = new THREE.Color(0x020510);
+    scene.fog = new THREE.FogExp2(0x020510, 0.0008);
 
     const camera = new THREE.PerspectiveCamera(
       60,
@@ -62,8 +84,11 @@ export default function SophonScene() {
       new THREE.BufferAttribute(sophonColors, 3)
     );
 
+    const glowTex = createGlowTexture(64, 0.15);
+
     const sophonMaterial = new THREE.PointsMaterial({
-      size: 3,
+      size: 6,
+      map: glowTex,
       vertexColors: true,
       transparent: true,
       opacity: 0.9,
@@ -90,11 +115,14 @@ export default function SophonScene() {
       new THREE.BufferAttribute(dustPositions, 3)
     );
 
+    const dustGlow = createGlowTexture(32, 0.3);
+
     const dustMaterial = new THREE.PointsMaterial({
-      size: 0.8,
-      color: 0x334466,
+      size: 1.5,
+      map: dustGlow,
+      color: 0x4466aa,
       transparent: true,
-      opacity: 0.4,
+      opacity: 0.35,
       blending: THREE.AdditiveBlending,
       depthWrite: false,
       sizeAttenuation: true,
@@ -215,9 +243,9 @@ export default function SophonScene() {
 
       // Dynamic point size based on zoom
       sophonMaterial.size = THREE.MathUtils.clamp(
-        3 * (500 / camDist),
-        1.5,
-        20
+        6 * (500 / camDist),
+        2,
+        30
       );
 
       camera.lookAt(0, 0, 0);
@@ -238,8 +266,10 @@ export default function SophonScene() {
       renderer.dispose();
       sophonGeometry.dispose();
       sophonMaterial.dispose();
+      glowTex.dispose();
       dustGeometry.dispose();
       dustMaterial.dispose();
+      dustGlow.dispose();
       container.removeChild(renderer.domElement);
     };
   }, []);
