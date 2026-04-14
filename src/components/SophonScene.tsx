@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, useImperativeHandle, forwardRef } from "react";
-import * as THREE from "three";
+import * as THREE from "three/webgpu";
 import { RGBELoader } from "three/addons/loaders/RGBELoader.js";
 import {
   SOPHON_COUNT,
@@ -62,15 +62,18 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
     const container = containerRef.current;
     if (!container) return;
 
+    let disposed = false;
+    let cleanupFn: (() => void) | null = null;
+
+    const setup = async () => {
     const sophonData = createSophonData();
 
     // --- Renderer ---
-    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    const renderer = new THREE.WebGPURenderer({ antialias: true });
     renderer.setPixelRatio(window.devicePixelRatio);
     renderer.setSize(window.innerWidth, window.innerHeight);
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 2.0;
-    container.appendChild(renderer.domElement);
 
     // --- Scene & Camera ---
     const scene = new THREE.Scene();
@@ -131,11 +134,11 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
 
     // --- Load HDR environment map ---
     const pmremGenerator = new THREE.PMREMGenerator(renderer);
-    pmremGenerator.compileEquirectangularShader();
 
     let hdrReady = false;
     new RGBELoader().load("/envmap.hdr", (hdrTexture) => {
-      const envMap = pmremGenerator.fromEquirectangular(hdrTexture).texture;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const envMap = (pmremGenerator as any).fromEquirectangular(hdrTexture).texture;
       scene.environment = envMap;
       scene.background = envMap;
       scene.backgroundIntensity = 0.35;
@@ -333,11 +336,9 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
     scene.add(ringMesh);
 
     // --- Animation loop ---
-    let animationId: number;
     let frameCount = 0;
 
     const animate = () => {
-      animationId = requestAnimationFrame(animate);
       if (!hdrReady) return;
       frameCount++;
 
@@ -493,11 +494,14 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
       renderer.render(scene, camera);
     };
 
-    animate();
+    // --- Start ---
+    await renderer.init();
+    if (disposed) { renderer.dispose(); return; }
+    container.appendChild(renderer.domElement);
+    renderer.setAnimationLoop(animate);
 
-    // --- Cleanup ---
-    return () => {
-      cancelAnimationFrame(animationId);
+    cleanupFn = () => {
+      renderer.setAnimationLoop(null);
       window.removeEventListener("mousemove", onMouseMove);
       window.removeEventListener("resize", onResize);
       window.removeEventListener("pointerup", onPointerUp);
@@ -516,6 +520,14 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
       ringGeo.dispose();
       ringMat.dispose();
       container.removeChild(renderer.domElement);
+    };
+    }; // end setup
+
+    setup();
+
+    return () => {
+      disposed = true;
+      cleanupFn?.();
     };
   }, []);
 
