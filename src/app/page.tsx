@@ -30,6 +30,7 @@ export default function Home() {
   const [etchingIndex, setEtchingIndex] = useState<number | null>(null);
 
   const handleSophonClick = useCallback((index: number) => {
+    if (index < 0) { setSelectedSophon(null); return; }
     const demo = DEMO_CLAIMED.find((d) => d.index === index);
     setSelectedSophon(
       demo ?? { index, claimed: false, nickname: "" }

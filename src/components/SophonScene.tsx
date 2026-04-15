@@ -124,7 +124,8 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
     const velocityDampingU = uniform(0.08);
     const maxSpeedU = uniform(35.0);
     const cameraPosU = uniform(new THREE.Vector3(0, 0, 500));
-    const freezeRadiusSqU = float(200 * 200); // squared distance for freeze zone
+    const freezeRadiusSqU = float(500 * 500); // squared distance for freeze zone
+    const lockedIdxU = uniform(-1); // index of locked particle (-1 = none)
 
     // Shift+click temporary attractor
     const attractorPosU = uniform(new THREE.Vector3(0, 0, 0));
@@ -199,9 +200,12 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
       // Per-particle freeze near camera (GPU-side, zero CPU cost)
       const toCam = cameraPosU.sub(pos);
       const camDistSq = toCam.dot(toCam);
-      const localSpeed = smoothstep(freezeRadiusSqU.mul(0.05), freezeRadiusSqU, camDistSq);
+      const localSpeed = smoothstep(freezeRadiusSqU.mul(0.05), freezeRadiusSqU, camDistSq).max(0.03);
+      // Freeze only the locked particle
+      const isLocked = float(instanceIndex.equal(uint(lockedIdxU)));
+      const finalSpeed = localSpeed.mul(float(1.0).sub(isLocked));
       // Apply velocity → position
-      pos.addAssign(vel.mul(speedFactorU).mul(localSpeed));
+      pos.addAssign(vel.mul(speedFactorU).mul(finalSpeed));
 
       // Mouse repulsion
       const toMouse = pos.sub(mousePosU);
@@ -216,7 +220,7 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
     const updateCompute = updateSophons().compute(SOPHON_COUNT);
 
     // Sophon sprite material
-    const glowTex = createGlowTexture(64, 0.15);
+    const glowTex = createGlowTexture(256, 0.15);
     const particleScale = uniform(1.0);
     const sophonMaterial = new (THREE as any).SpriteNodeMaterial({
       transparent: true,
@@ -232,6 +236,7 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
     sophonMaterial.scaleNode = particleScale.mul(particleScaleU);
     const sophonGeo = new THREE.PlaneGeometry(2, 2);
     const sophonMesh = new THREE.InstancedMesh(sophonGeo, sophonMaterial, SOPHON_COUNT);
+    sophonMesh.frustumCulled = false;
     scene.add(sophonMesh);
 
     // --- Dust particle system (static, pre-filled) ---
@@ -254,6 +259,7 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
     dustMaterial.scaleNode = float(1.5);
     const dustGeo = new THREE.PlaneGeometry(1, 1);
     const dustMesh = new THREE.InstancedMesh(dustGeo, dustMaterial, DUST_COUNT);
+    dustMesh.frustumCulled = false;
     scene.add(dustMesh);
 
     // --- Load HDR environment map ---
@@ -297,6 +303,7 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
       LOD_SPHERE_COUNT
     );
     instancedSophons.visible = false;
+    instancedSophons.frustumCulled = false;
     scene.add(instancedSophons);
 
     const nearestIndices: number[] = [];
@@ -333,17 +340,30 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
     };
     window.addEventListener("mousemove", onMouseMove);
 
-    // --- Zoom (scroll with inertia) ---
+    // --- Zoom (scroll = push/pull along view direction) ---
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
-      zoomVelocity += Math.sign(e.deltaY) * 0.04;
+      // Scroll-out exits lock mode
+      if (lockedIdx >= 0 && e.deltaY > 0) {
+        lockedIdx = -1;
+        onSophonClickRef.current?.(-1);
+        return;
+      }
+      if (lockedIdx >= 0) return;
+      zoomVelocity += -Math.sign(e.deltaY) * 0.04;
     };
     renderer.domElement.addEventListener("wheel", onWheel, { passive: false });
 
-    // --- Drag to rotate ---
+    // --- WASDQE key state ---
+    const keysPressed = new Set<string>();
+    const onKeyDownMove = (e: KeyboardEvent) => { keysPressed.add(e.key.toLowerCase()); };
+    const onKeyUpMove = (e: KeyboardEvent) => { keysPressed.delete(e.key.toLowerCase()); };
+    window.addEventListener("keydown", onKeyDownMove);
+    window.addEventListener("keyup", onKeyUpMove);
+
+    // --- Drag to free-look ---
     let isDragging = false;
     let prevMouse = { x: 0, y: 0 };
-    const spherical = new THREE.Spherical().setFromVector3(camera.position);
 
     let pointerDownPos = { x: 0, y: 0 };
     let shiftAttractorActive = false;
@@ -372,6 +392,12 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
       const moved = Math.sqrt(dx * dx + dy * dy);
 
       if (moved < 5) {
+        // Click while locked: exit lock mode if clicking empty space
+        if (lockedIdx >= 0) {
+          lockedIdx = -1;
+          onSophonClickRef.current?.(-1);
+          return;
+        }
         // Click (not drag): find nearest sophon to click ray
         const clickMouse = new THREE.Vector2(
           (e.clientX / window.innerWidth) * 2 - 1,
@@ -411,6 +437,9 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
           flyTargetIdx = bestIdx;
           flyProgress = 0;
           flyStartPos = camera.position.clone();
+          flyStartLookAt.set(0, 0, 0).copy(camera.getWorldDirection(new THREE.Vector3()).multiplyScalar(100).add(camera.position));
+          // Fixed approach direction: from camera toward target, computed once
+          flyDir.copy(camera.position).sub(flyTarget).normalize();
 
           onSophonClickRef.current?.(bestIdx);
         }
@@ -418,17 +447,39 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
 
       isDragging = false;
     };
+    const _euler = new THREE.Euler(0, 0, 0, 'YXZ');
+    const _rotAxis = new THREE.Vector3();
+    const _qRot = new THREE.Quaternion();
+    const rotateFlyDir = (yaw: number, pitch: number) => {
+      // Yaw: rotate around world up
+      _qRot.setFromAxisAngle(camera.up, yaw);
+      flyDir.applyQuaternion(_qRot);
+      // Pitch: rotate around camera right axis, with pole clamping
+      _rotAxis.crossVectors(camera.up, flyDir).normalize();
+      const saved = flyDir.clone();
+      _qRot.setFromAxisAngle(_rotAxis, pitch);
+      flyDir.applyQuaternion(_qRot);
+      flyDir.normalize();
+      // Clamp: reject pitch if too close to pole (|dot with up| > 0.95)
+      if (Math.abs(flyDir.dot(camera.up)) > 0.95) {
+        flyDir.copy(saved);
+      }
+    };
     const onPointerMove = (e: PointerEvent) => {
       if (!isDragging) return;
       const dx = e.clientX - prevMouse.x;
       const dy = e.clientY - prevMouse.y;
       prevMouse = { x: e.clientX, y: e.clientY };
-      spherical.setFromVector3(camera.position);
-      spherical.theta -= dx * 0.005;
-      spherical.phi -= dy * 0.005;
-      spherical.phi = Math.max(0.1, Math.min(Math.PI - 0.1, spherical.phi));
-      camera.position.setFromSpherical(spherical);
-      camera.lookAt(0, 0, 0);
+      if (lockedIdx >= 0) {
+        // Orbit around locked particle
+        rotateFlyDir(dx * 0.003, dy * 0.003);
+      } else {
+        _euler.setFromQuaternion(camera.quaternion);
+        _euler.y -= dx * 0.003;
+        _euler.x -= dy * 0.003;
+        _euler.x = Math.max(-Math.PI / 2 + 0.01, Math.min(Math.PI / 2 - 0.01, _euler.x));
+        camera.quaternion.setFromEuler(_euler);
+      }
     };
 
     renderer.domElement.addEventListener("pointerdown", onPointerDown);
@@ -587,7 +638,11 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
     let flyTarget: THREE.Vector3 | null = null;
     let flyTargetIdx = -1; // tracked particle index
     let flyStartPos = new THREE.Vector3();
+    let flyDir = new THREE.Vector3(); // fixed approach direction (computed once)
+    let flyStartLookAt = new THREE.Vector3(); // lookAt target at start of flight
     let flyProgress = 0;
+    let lockedIdx = -1; // locked close-up particle index (-1 = free camera)
+    const LOCK_DISTANCE = 15; // camera distance from particle in lock mode
     const positions = sophonData.positions;
 
     // --- Claim animation state ---
@@ -619,13 +674,67 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
       if (!hdrReady) return;
       frameCount++;
 
-      // Apply zoom velocity with damping (smooth deceleration)
+      // Apply zoom velocity along view direction
       if (Math.abs(zoomVelocity) > 0.0005) {
-        camera.position.multiplyScalar(1 + zoomVelocity);
-        camera.position.clampLength(10, 2000);
-        zoomVelocity *= 0.88; // damping factor
+        const fwd = new THREE.Vector3();
+        camera.getWorldDirection(fwd);
+        camera.position.addScaledVector(fwd, zoomVelocity * 30);
+        zoomVelocity *= 0.88;
       } else {
         zoomVelocity = 0;
+      }
+
+      // WASDQE movement
+      if (!flyTarget) {
+        const boost = keysPressed.has(' ') ? 5.0 : 1.0;
+        const rotSpeed = 0.02 * boost;
+        if (lockedIdx >= 0) {
+          // Orbit around locked particle with WASD
+          if (keysPressed.has('a')) rotateFlyDir(-rotSpeed, 0);
+          if (keysPressed.has('d')) rotateFlyDir(rotSpeed, 0);
+          if (keysPressed.has('w') || keysPressed.has('z')) rotateFlyDir(0, -rotSpeed);
+          if (keysPressed.has('s') || keysPressed.has('x')) rotateFlyDir(0, rotSpeed);
+          if (keysPressed.has('e')) {
+            _qRot.setFromAxisAngle(flyDir, -rotSpeed);
+            camera.up.applyQuaternion(_qRot).normalize();
+          }
+          if (keysPressed.has('q')) {
+            _qRot.setFromAxisAngle(flyDir, rotSpeed);
+            camera.up.applyQuaternion(_qRot).normalize();
+          }
+        } else {
+          const moveSpeed = 2.0 * boost;
+          const fwd = new THREE.Vector3();
+          camera.getWorldDirection(fwd);
+          const right = new THREE.Vector3();
+          right.crossVectors(fwd, camera.up).normalize();
+          if (keysPressed.has('w')) camera.position.addScaledVector(fwd, moveSpeed);
+          if (keysPressed.has('s')) camera.position.addScaledVector(fwd, -moveSpeed);
+          if (keysPressed.has('q')) camera.position.addScaledVector(right, -moveSpeed);
+          if (keysPressed.has('e')) camera.position.addScaledVector(right, moveSpeed);
+          if (keysPressed.has('a')) {
+            _euler.setFromQuaternion(camera.quaternion);
+            _euler.y += rotSpeed;
+            camera.quaternion.setFromEuler(_euler);
+          }
+          if (keysPressed.has('d')) {
+            _euler.setFromQuaternion(camera.quaternion);
+            _euler.y -= rotSpeed;
+            camera.quaternion.setFromEuler(_euler);
+          }
+          if (keysPressed.has('z')) {
+            _euler.setFromQuaternion(camera.quaternion);
+            _euler.x += rotSpeed;
+            _euler.x = Math.min(Math.PI / 2 - 0.01, _euler.x);
+            camera.quaternion.setFromEuler(_euler);
+          }
+          if (keysPressed.has('x')) {
+            _euler.setFromQuaternion(camera.quaternion);
+            _euler.x -= rotSpeed;
+            _euler.x = Math.max(-Math.PI / 2 + 0.01, _euler.x);
+            camera.quaternion.setFromEuler(_euler);
+          }
+        }
       }
 
       const camDist = camera.position.length();
@@ -634,8 +743,8 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
       updateAttractorDrift(frameCount / 60);
 
       // Update GPU compute uniforms
-      speedFactorU.value = THREE.MathUtils.clamp(camDist / 1500, 0.01, 1);
-      cameraPosU.value.copy(camera.position);
+      speedFactorU.value = 1.0;
+      lockedIdxU.value = lockedIdx;
       // Scale particles with camera distance: bigger when far away
       particleScaleU.value = Math.max(1.0, camDist / 500);
       mousePosU.value.copy(mouse3D);
@@ -671,44 +780,44 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
       // Dynamic sprite scale
       particleScale.value = THREE.MathUtils.clamp(4 * (500 / camDist), 1, 20);
 
-      // --- LOD: show sphere instances when zoomed in (only after GPU sync) ---
-      const showSpheres = camDist < LOD_SHOW_DIST && gpuSynced;
-      instancedSophons.visible = showSpheres;
-
-      if (showSpheres) {
-        const lodAlpha = THREE.MathUtils.clamp(
-          1 - (camDist - LOD_FULL_DIST) / (LOD_SHOW_DIST - LOD_FULL_DIST),
-          0,
-          1
+      // --- LOD: show sphere instances when near any particle (not origin) ---
+      // Update nearest list periodically
+      if (gpuSynced && frameCount % 10 === 0) {
+        const nearest = findNearestSophons(
+          positions,
+          camera.position,
+          LOD_SPHERE_COUNT
         );
-        sphereMat.opacity = lodAlpha;
+        nearestIndices.length = 0;
+        nearestIndices.push(...nearest);
+      }
+      // Distance to nearest particle determines LOD visibility
+      let nearestDist = Infinity;
+      if (nearestIndices.length > 0) {
+        const ni = nearestIndices[0] * 3;
+        const ndx = positions[ni] - camera.position.x;
+        const ndy = positions[ni + 1] - camera.position.y;
+        const ndz = positions[ni + 2] - camera.position.z;
+        nearestDist = Math.sqrt(ndx * ndx + ndy * ndy + ndz * ndz);
+      }
+      // Only show metal sphere for the locked/focused particle
+      const showSphere = lockedIdx >= 0 && gpuSynced;
+      instancedSophons.visible = showSphere;
 
-        // Update nearest list every 10 frames (perf)
-        if (frameCount % 10 === 0) {
-          const nearest = findNearestSophons(
-            positions,
-            camera.position,
-            LOD_SPHERE_COUNT
-          );
-          nearestIndices.length = 0;
-          nearestIndices.push(...nearest);
-        }
-
-        for (let n = 0; n < LOD_SPHERE_COUNT; n++) {
-          const idx = nearestIndices[n];
-          if (idx === undefined) {
-            _dummy.scale.set(0, 0, 0);
-          } else {
-            const i3 = idx * 3;
-            _dummy.position.set(positions[i3], positions[i3 + 1], positions[i3 + 2]);
-            _dummy.scale.set(1, 1, 1);
-          }
+      if (showSphere) {
+        sphereMat.opacity = 1.0;
+        const li3 = lockedIdx * 3;
+        _dummy.position.set(positions[li3], positions[li3 + 1], positions[li3 + 2]);
+        _dummy.scale.set(1, 1, 1);
+        _dummy.updateMatrix();
+        instancedSophons.setMatrixAt(0, _dummy.matrix);
+        // Hide remaining instances
+        for (let n = 1; n < LOD_SPHERE_COUNT; n++) {
+          _dummy.scale.set(0, 0, 0);
           _dummy.updateMatrix();
           instancedSophons.setMatrixAt(n, _dummy.matrix);
         }
         instancedSophons.instanceMatrix.needsUpdate = true;
-
-        // Move point light near camera for sphere illumination
         pointLight.position.copy(camera.position);
       }
 
@@ -740,30 +849,42 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
 
       // --- Fly-to animation ---
       if (flyTarget && flyTargetIdx >= 0) {
-        // Slow down all particles during flight so target doesn't drift away
-        speedFactorU.value *= 0.3;
-
         // Track real particle position each frame
         const ti3 = flyTargetIdx * 3;
         flyTarget.set(positions[ti3], positions[ti3 + 1], positions[ti3 + 2]);
 
         flyProgress += 0.02;
-        const currentFlyTarget = flyTarget;
+        const t = Math.min(flyProgress, 1);
+        const eased = t * t * (3 - 2 * t); // smoothstep
+        const targetCamPos = flyTarget.clone().add(flyDir.clone().multiplyScalar(LOCK_DISTANCE));
+        camera.position.lerpVectors(flyStartPos, targetCamPos, eased);
+        const currentLookAt = flyStartLookAt.clone().lerp(flyTarget, eased);
+        camera.lookAt(currentLookAt);
+
         if (flyProgress >= 1) {
-          flyProgress = 1;
+          // Enter lock mode
+          lockedIdx = flyTargetIdx;
           flyTarget = null;
           flyTargetIdx = -1;
         }
-        const t = flyProgress * flyProgress * (3 - 2 * flyProgress); // smoothstep
-        const targetCamPos = currentFlyTarget.clone().add(
-          camera.position.clone().sub(currentFlyTarget).normalize().multiplyScalar(20)
+      } else if (lockedIdx >= 0) {
+        // Lock mode: camera stays near particle, always looking at it
+        const li3 = lockedIdx * 3;
+        const lockPos = new THREE.Vector3(positions[li3], positions[li3 + 1], positions[li3 + 2]);
+        // Gentle floating motion for the close-up
+        const ft = frameCount * 0.015;
+        const floatOffset = new THREE.Vector3(
+          Math.sin(ft) * 0.3,
+          Math.sin(ft * 0.7 + 1.0) * 0.3,
+          Math.sin(ft * 0.5 + 2.0) * 0.15
         );
-        camera.position.lerpVectors(flyStartPos, targetCamPos, t);
-        camera.lookAt(currentFlyTarget);
-      } else {
-        camera.lookAt(0, 0, 0);
+        const animPos = lockPos.clone().add(floatOffset);
+        camera.position.copy(animPos.clone().add(flyDir.clone().multiplyScalar(LOCK_DISTANCE)));
+        camera.lookAt(animPos);
       }
 
+      // Update freeze zone to actual camera position (after fly-to/lock override)
+      cameraPosU.value.copy(camera.position);
       renderer.render(scene, camera);
     };
 
@@ -780,6 +901,8 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
       window.removeEventListener("pointerup", onPointerUp);
       window.removeEventListener("pointermove", onPointerMove);
       window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keydown", onKeyDownMove);
+      window.removeEventListener("keyup", onKeyUpMove);
       renderer.domElement.removeEventListener("wheel", onWheel);
       renderer.domElement.removeEventListener("pointerdown", onPointerDown);
       renderer.dispose();
