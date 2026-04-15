@@ -1,8 +1,9 @@
 import * as THREE from "three";
 
-export const SOPHON_COUNT = 2000;
-export const DUST_COUNT = 8000;
-export const SPACE_SIZE = 1000;
+export const SOPHON_COUNT = 5000;
+export const DUST_COUNT = 100000;
+export const INIT_SPACE_SIZE = 2000;      // particle initial spawn range
+export const BOUNDARY_SPACE_SIZE = 3000;  // wrap-around boundary size
 
 export interface SophonState {
   positions: Float32Array;
@@ -21,9 +22,9 @@ export function createSophonData(): SophonState {
 
   for (let i = 0; i < SOPHON_COUNT; i++) {
     const i3 = i * 3;
-    positions[i3] = (Math.random() - 0.5) * SPACE_SIZE;
-    positions[i3 + 1] = (Math.random() - 0.5) * SPACE_SIZE;
-    positions[i3 + 2] = (Math.random() - 0.5) * SPACE_SIZE;
+    positions[i3] = (Math.random() - 0.5) * INIT_SPACE_SIZE;
+    positions[i3 + 1] = (Math.random() - 0.5) * INIT_SPACE_SIZE;
+    positions[i3 + 2] = (Math.random() - 0.5) * INIT_SPACE_SIZE;
 
     velocities[i3] = (Math.random() - 0.5) * 0.3;
     velocities[i3 + 1] = (Math.random() - 0.5) * 0.3;
@@ -47,9 +48,9 @@ export function createDustPositions(): Float32Array {
   const positions = new Float32Array(DUST_COUNT * 3);
   for (let i = 0; i < DUST_COUNT; i++) {
     const i3 = i * 3;
-    positions[i3] = (Math.random() - 0.5) * SPACE_SIZE * 2;
-    positions[i3 + 1] = (Math.random() - 0.5) * SPACE_SIZE * 2;
-    positions[i3 + 2] = (Math.random() - 0.5) * SPACE_SIZE * 2;
+    positions[i3] = (Math.random() - 0.5) * INIT_SPACE_SIZE * 2;
+    positions[i3 + 1] = (Math.random() - 0.5) * INIT_SPACE_SIZE * 2;
+    positions[i3 + 2] = (Math.random() - 0.5) * INIT_SPACE_SIZE * 2;
   }
   return positions;
 }

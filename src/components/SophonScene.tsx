@@ -9,7 +9,7 @@ import { RGBELoader } from "three/addons/loaders/RGBELoader.js";
 import {
   SOPHON_COUNT,
   DUST_COUNT,
-  SPACE_SIZE,
+  BOUNDARY_SPACE_SIZE,
   createSophonData,
   createDustPositions,
   findNearestSophons,
@@ -113,7 +113,8 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
 
     // Uniforms for compute
     const speedFactorU = uniform(1.0);
-    const spaceSizeF = float(SPACE_SIZE);
+    const particleScaleU = uniform(1.0);  // camera-distance based particle scale
+    const spaceSizeF = float(BOUNDARY_SPACE_SIZE);
     const mousePosU = uniform(new THREE.Vector3(0, 0, 0));
     const mouseRadiusF = float(80);
 
@@ -210,7 +211,7 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
 
     // Sophon sprite material
     const glowTex = createGlowTexture(64, 0.15);
-    const particleScale = uniform(4.0);
+    const particleScale = uniform(1.0);
     const sophonMaterial = new (THREE as any).SpriteNodeMaterial({
       transparent: true,
       blending: THREE.AdditiveBlending,
@@ -222,8 +223,8 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
       const brightness = hash(instanceIndex.add(uint(42))).mul(0.3).add(0.7);
       return vec4(vec3(brightness).mul(glow.rgb), glow.a);
     })();
-    sophonMaterial.scaleNode = particleScale;
-    const sophonGeo = new THREE.PlaneGeometry(1, 1);
+    sophonMaterial.scaleNode = particleScale.mul(particleScaleU);
+    const sophonGeo = new THREE.PlaneGeometry(2, 2);
     const sophonMesh = new THREE.InstancedMesh(sophonGeo, sophonMaterial, SOPHON_COUNT);
     scene.add(sophonMesh);
 
@@ -322,7 +323,7 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
       mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
       raycaster.setFromCamera(mouse, camera);
       const dir = raycaster.ray.direction.clone();
-      mouse3D.copy(camera.position).add(dir.multiplyScalar(300));
+      mouse3D.copy(camera.position).add(dir.multiplyScalar(1000));
     };
     window.addEventListener("mousemove", onMouseMove);
 
@@ -335,7 +336,7 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
       } else {
         camera.position.multiplyScalar(1 / zoomSpeed);
       }
-      camera.position.clampLength(10, 3000);
+      camera.position.clampLength(10, 2000);
     };
     renderer.domElement.addEventListener("wheel", onWheel, { passive: false });
 
@@ -433,6 +434,121 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
     window.addEventListener("pointerup", onPointerUp);
     window.addEventListener("pointermove", onPointerMove);
 
+    // --- Debug: attractor visualizers ---
+    const ATTRACTOR_COLORS = [0xff4444, 0x44ff44, 0x4488ff];
+    const attractorPosData = [
+      new THREE.Vector3(-200, 80, -150),
+      new THREE.Vector3(180, -60, 200),
+      new THREE.Vector3(50, 150, -100),
+    ];
+    const attractorAxisData = [
+      new THREE.Vector3(0.3, 0.9, 0.1).normalize(),
+      new THREE.Vector3(-0.5, 0.7, 0.4).normalize(),
+      new THREE.Vector3(0.2, -0.8, 0.6).normalize(),
+    ];
+    // Debug group: not added to scene until toggled on (WebGPU compat)
+    const debugGroup = new THREE.Group();
+    let debugInScene = false;
+
+    // Trail data (recorded even when hidden, drawn when visible)
+    const TRAIL_LENGTH = 600;
+    const FUTURE_POINTS = 1200;
+    const trailPositions: Float32Array[] = [];
+    const trailHeads: number[] = [0, 0, 0];
+    const trailFilled: boolean[] = [false, false, false];
+    for (let i = 0; i < AMBIENT_COUNT; i++) {
+      trailPositions.push(new Float32Array(TRAIL_LENGTH * 3));
+    }
+
+    let debugVisible = false;
+
+    // Attractor auto-drift: each attractor orbits its origin via Lissajous curves
+    const driftRadius = 150;   // max drift distance from origin
+    const driftSpeed = 0.15;   // base angular speed (radians/sec)
+    // Per-attractor frequency ratios for organic, non-repeating paths
+    const driftFreqs = [
+      { fx: 1.0, fy: 0.7, fz: 0.4 },
+      { fx: 0.6, fy: 1.0, fz: 0.8 },
+      { fx: 0.8, fy: 0.5, fz: 1.0 },
+    ];
+    // Phase offsets so they don't start in sync
+    const driftPhase = [0, 2.1, 4.2];
+
+    const buildDebugObjects = (currentTime: number) => {
+      // Clear previous
+      while (debugGroup.children.length) debugGroup.remove(debugGroup.children[0]);
+
+      for (let i = 0; i < AMBIENT_COUNT; i++) {
+        const color = ATTRACTOR_COLORS[i];
+        const origin = attractorPosData[i];
+        const f = driftFreqs[i];
+
+        // Current position marker (sphere)
+        const sGeo = new THREE.SphereGeometry(8, 12, 8);
+        const sMat = new THREE.MeshBasicMaterial({ color, wireframe: true });
+        const sphere = new THREE.Mesh(sGeo, sMat);
+        const curPos = (ambientPositions.array as THREE.Vector3[])[i];
+        sphere.position.copy(curPos);
+        debugGroup.add(sphere);
+
+        // Past trail
+        const pastCount = trailFilled[i] ? TRAIL_LENGTH : trailHeads[i];
+        if (pastCount > 1) {
+          const pastGeo = new THREE.BufferGeometry();
+          pastGeo.setAttribute("position", new THREE.BufferAttribute(trailPositions[i].slice(0, pastCount * 3), 3));
+          const pastMat = new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.4, depthWrite: false });
+          debugGroup.add(new THREE.Line(pastGeo, pastMat));
+        }
+
+        // Future trajectory
+        const futArr = new Float32Array(FUTURE_POINTS * 3);
+        for (let p = 0; p < FUTURE_POINTS; p++) {
+          const ft = (currentTime + p / 60) * driftSpeed + driftPhase[i];
+          futArr[p * 3]     = origin.x + Math.sin(ft * f.fx) * driftRadius;
+          futArr[p * 3 + 1] = origin.y + Math.sin(ft * f.fy + 1.3) * driftRadius;
+          futArr[p * 3 + 2] = origin.z + Math.sin(ft * f.fz + 2.7) * driftRadius;
+        }
+        const futGeo = new THREE.BufferGeometry();
+        futGeo.setAttribute("position", new THREE.BufferAttribute(futArr, 3));
+        const futMat = new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.15, depthWrite: false });
+        debugGroup.add(new THREE.Line(futGeo, futMat));
+      }
+    };
+
+    const updateAttractorDrift = (time: number) => {
+      for (let i = 0; i < AMBIENT_COUNT; i++) {
+        const origin = attractorPosData[i];
+        const f = driftFreqs[i];
+        const t = time * driftSpeed + driftPhase[i];
+        const dx = Math.sin(t * f.fx) * driftRadius;
+        const dy = Math.sin(t * f.fy + 1.3) * driftRadius;
+        const dz = Math.sin(t * f.fz + 2.7) * driftRadius;
+        const pos = (ambientPositions.array as THREE.Vector3[])[i];
+        pos.set(origin.x + dx, origin.y + dy, origin.z + dz);
+        // Slowly rotate axis too
+        const ax = attractorAxisData[i];
+        const rt = t * 0.3;
+        const rxd = Math.sin(rt * f.fy) * 0.3;
+        const ryd = Math.cos(rt * f.fz) * 0.3;
+        const rzd = Math.sin(rt * f.fx + 1.0) * 0.3;
+        (ambientAxes.array as THREE.Vector3[])[i].set(
+          ax.x + rxd, ax.y + ryd, ax.z + rzd
+        ).normalize();
+        // Record trail point
+        const head = trailHeads[i];
+        const arr = trailPositions[i];
+        arr[head * 3] = pos.x;
+        arr[head * 3 + 1] = pos.y;
+        arr[head * 3 + 2] = pos.z;
+        trailHeads[i] = (head + 1) % TRAIL_LENGTH;
+        if (!trailFilled[i] && trailHeads[i] === 0) trailFilled[i] = true;
+      }
+      // Rebuild debug visuals periodically when visible
+      if (debugVisible && frameCount % 30 === 0) {
+        buildDebugObjects(time);
+      }
+    };
+
     // --- Tab to switch attractor mode ---
     const MODE_NAMES = ["Shell Orbit", "Thomas Attractor"];
     let currentMode = 0;
@@ -442,6 +558,18 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
         currentMode = (currentMode + 1) % MODE_NAMES.length;
         attractorModeU.value = currentMode;
         console.log(`Attractor mode: ${MODE_NAMES[currentMode]}`);
+        return;
+      }
+      if (e.key === "`") {
+        debugVisible = !debugVisible;
+        if (debugVisible) {
+          buildDebugObjects(frameCount / 60);
+          if (!debugInScene) { scene.add(debugGroup); debugInScene = true; }
+        } else {
+          if (debugInScene) { scene.remove(debugGroup); debugInScene = false; }
+        }
+        console.log(debugVisible ? "Attractor debug ON" : "Attractor debug OFF");
+        return;
       }
     };
     window.addEventListener("keydown", onKeyDown);
@@ -488,8 +616,13 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
 
       const camDist = camera.position.length();
 
+      // Drift ambient attractors along Lissajous paths
+      updateAttractorDrift(frameCount / 60);
+
       // Update GPU compute uniforms
       speedFactorU.value = THREE.MathUtils.clamp(camDist / 1500, 0.15, 1);
+      // Scale particles with camera distance: bigger when far away
+      particleScaleU.value = Math.max(1.0, camDist / 500);
       mousePosU.value.copy(mouse3D);
       if (shiftAttractorActive) attractorPosU.value.copy(mouse3D);
 
@@ -498,15 +631,15 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
 
       // CPU shadow position update (for click detection & LOD)
       const sf = speedFactorU.value;
-      const half = SPACE_SIZE / 2;
+      const half = BOUNDARY_SPACE_SIZE / 2;
       for (let i = 0; i < SOPHON_COUNT; i++) {
         const i3 = i * 3;
         positions[i3] += sophonData.velocities[i3] * sf;
         positions[i3 + 1] += sophonData.velocities[i3 + 1] * sf;
         positions[i3 + 2] += sophonData.velocities[i3 + 2] * sf;
         for (let j = 0; j < 3; j++) {
-          if (positions[i3 + j] > half) positions[i3 + j] -= SPACE_SIZE;
-          if (positions[i3 + j] < -half) positions[i3 + j] += SPACE_SIZE;
+          if (positions[i3 + j] > half) positions[i3 + j] -= BOUNDARY_SPACE_SIZE;
+          if (positions[i3 + j] < -half) positions[i3 + j] += BOUNDARY_SPACE_SIZE;
         }
       }
 
