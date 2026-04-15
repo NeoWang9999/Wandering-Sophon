@@ -4,7 +4,7 @@ import { useEffect, useRef, useState, useImperativeHandle, forwardRef } from "re
 import * as THREE from "three/webgpu";
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore - three/tsl types incomplete for r172 WebGPU TSL
-import { storage, instanceIndex, Fn, float, vec3, vec4, uniform, uniformArray, hash, uint, mod, texture as tslTexture, uv, Loop } from "three/tsl";
+import { storage, instanceIndex, Fn, float, vec3, vec4, uniform, uniformArray, hash, uint, mod, texture as tslTexture, uv, Loop, mix } from "three/tsl";
 import { RGBELoader } from "three/addons/loaders/RGBELoader.js";
 import {
   SOPHON_COUNT,
@@ -126,7 +126,18 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
     // Shift+click temporary attractor
     const attractorPosU = uniform(new THREE.Vector3(0, 0, 0));
     const attractorActiveU = uniform(0.0); // 0 = off, 1 = on
-    const clickMassU = uniform(3e7);
+    const attractorModeU = uniform(0.0);   // 0 = shell, 1 = Thomas
+
+    // Mode 0: Shell orbit params
+    const shellRadius = float(5.0);
+    const shellSpring = float(0.3);
+    const orbitForce = float(20.0);
+    const orbitDampingReduce = float(0.75);
+
+    // Mode 1: Thomas attractor params
+    const thomasB = float(0.208186);       // Thomas damping coefficient
+    const thomasScale = float(30.0);       // maps attractor [-3,3] to ~180 world units
+    const thomasSpeed = float(8.0);        // flow speed multiplier
 
     // Update compute
     const updateSophons = Fn(() => {
@@ -136,32 +147,51 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
 
       const force = vec3(0.0).toVar();
 
-      // Ambient attractors (always active → fluid flow)
+      // Ambient attractors (disabled when click attractor active)
+      const ambientScale = float(1.0).sub(attractorActiveU);
       Loop(AMBIENT_COUNT, ({ i }: { i: any }) => {
         const aPos = ambientPositions.element(i);
         const aAxis = ambientAxes.element(i);
         const toA = aPos.sub(pos);
         const aDist = toA.length().max(5.0);
         const aDir = toA.normalize();
-        const gStr = ambientMassU.div(aDist.mul(aDist));
+        const gStr = ambientMassU.div(aDist.mul(aDist)).mul(ambientScale);
         force.addAssign(aDir.mul(gStr));
         force.addAssign(aAxis.mul(gStr).mul(spinStrengthU).cross(toA));
       });
 
-      // Shift+click attractor (temporary, much stronger)
+      // --- Mode 0: Shell orbit ---
+      const isShell = attractorActiveU.mul(float(1.0).sub(attractorModeU));
       const toClick = attractorPosU.sub(pos);
-      const cDist = toClick.length().max(0.5);
+      const cDist = toClick.length().max(0.1);
       const cDir = toClick.normalize();
-      const cStr = clickMassU.div(cDist.mul(cDist)).mul(attractorActiveU);
-      force.addAssign(cDir.mul(cStr));
-      const clickSpin = vec3(0.2, 0.9, 0.3);
-      force.addAssign(clickSpin.mul(cStr).mul(spinStrengthU).cross(toClick));
+      // Soft spring toward shell (particles can drift through)
+      const springStr = cDist.sub(shellRadius).mul(shellSpring).mul(isShell);
+      force.addAssign(cDir.mul(springStr));
+      // Per-particle random tangent for orbital motion on sphere
+      const rndA = hash(instanceIndex.add(uint(123))).mul(6.28);
+      const rndB = hash(instanceIndex.add(uint(456))).mul(6.28);
+      const rndAxis = vec3(rndA.sin(), rndB.cos(), rndA.cos().mul(rndB.sin())).normalize();
+      const tangent = rndAxis.cross(cDir).normalize();
+      force.addAssign(tangent.mul(isShell).mul(orbitForce));
 
       // Apply force → velocity
       vel.addAssign(force.mul(delta));
       const speed = vel.length();
       vel.assign(vel.normalize().mul(speed.min(maxSpeedU)));
-      vel.mulAssign(float(1.0).sub(velocityDampingU));
+      // Lower damping when orbiting so orbital velocity sustains
+      const effectiveDamping = velocityDampingU.mul(float(1.0).sub(isShell.mul(orbitDampingReduce)));
+      vel.mulAssign(float(1.0).sub(effectiveDamping));
+
+      // --- Mode 1: Thomas attractor (override velocity from ODE field) ---
+      const isThomas = attractorActiveU.mul(attractorModeU);
+      const lp = pos.sub(attractorPosU).div(thomasScale); // local position in attractor space
+      const tv = vec3(
+        lp.y.sin().sub(thomasB.mul(lp.x)),
+        lp.z.sin().sub(thomasB.mul(lp.y)),
+        lp.x.sin().sub(thomasB.mul(lp.z))
+      ).mul(thomasSpeed);
+      vel.assign(mix(vel, tv, isThomas));
 
       // Apply velocity → position (speedFactor slows when zoomed in)
       pos.addAssign(vel.mul(speedFactorU));
@@ -403,6 +433,19 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
     window.addEventListener("pointerup", onPointerUp);
     window.addEventListener("pointermove", onPointerMove);
 
+    // --- Tab to switch attractor mode ---
+    const MODE_NAMES = ["Shell Orbit", "Thomas Attractor"];
+    let currentMode = 0;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Tab") {
+        e.preventDefault();
+        currentMode = (currentMode + 1) % MODE_NAMES.length;
+        attractorModeU.value = currentMode;
+        console.log(`Attractor mode: ${MODE_NAMES[currentMode]}`);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+
     // --- Resize ---
     const onResize = () => {
       camera.aspect = window.innerWidth / window.innerHeight;
@@ -570,6 +613,7 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
       window.removeEventListener("resize", onResize);
       window.removeEventListener("pointerup", onPointerUp);
       window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("keydown", onKeyDown);
       renderer.domElement.removeEventListener("wheel", onWheel);
       renderer.domElement.removeEventListener("pointerdown", onPointerDown);
       renderer.dispose();
