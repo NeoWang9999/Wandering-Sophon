@@ -4,7 +4,7 @@ import { useEffect, useRef, useState, useImperativeHandle, forwardRef } from "re
 import * as THREE from "three/webgpu";
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore - three/tsl types incomplete for r172 WebGPU TSL
-import { storage, instanceIndex, Fn, float, vec3, vec4, uniform, uniformArray, hash, uint, mod, texture as tslTexture, uv, Loop, mix } from "three/tsl";
+import { storage, instanceIndex, Fn, float, vec3, vec4, uniform, uniformArray, hash, uint, mod, texture as tslTexture, uv, Loop, mix, smoothstep } from "three/tsl";
 import { RGBELoader } from "three/addons/loaders/RGBELoader.js";
 import {
   SOPHON_COUNT,
@@ -123,6 +123,8 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
     const spinStrengthU = uniform(2.5);
     const velocityDampingU = uniform(0.08);
     const maxSpeedU = uniform(35.0);
+    const cameraPosU = uniform(new THREE.Vector3(0, 0, 500));
+    const freezeRadiusSqU = float(200 * 200); // squared distance for freeze zone
 
     // Shift+click temporary attractor
     const attractorPosU = uniform(new THREE.Vector3(0, 0, 0));
@@ -194,8 +196,12 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
       ).mul(thomasSpeed);
       vel.assign(mix(vel, tv, isThomas));
 
-      // Apply velocity → position (speedFactor slows when zoomed in)
-      pos.addAssign(vel.mul(speedFactorU));
+      // Per-particle freeze near camera (GPU-side, zero CPU cost)
+      const toCam = cameraPosU.sub(pos);
+      const camDistSq = toCam.dot(toCam);
+      const localSpeed = smoothstep(freezeRadiusSqU.mul(0.05), freezeRadiusSqU, camDistSq);
+      // Apply velocity → position
+      pos.addAssign(vel.mul(speedFactorU).mul(localSpeed));
 
       // Mouse repulsion
       const toMouse = pos.sub(mousePosU);
@@ -327,16 +333,10 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
     };
     window.addEventListener("mousemove", onMouseMove);
 
-    // --- Zoom (scroll) ---
+    // --- Zoom (scroll with inertia) ---
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
-      const zoomSpeed = 1.05;
-      if (e.deltaY > 0) {
-        camera.position.multiplyScalar(zoomSpeed);
-      } else {
-        camera.position.multiplyScalar(1 / zoomSpeed);
-      }
-      camera.position.clampLength(10, 2000);
+      zoomVelocity += Math.sign(e.deltaY) * 0.04;
     };
     renderer.domElement.addEventListener("wheel", onWheel, { passive: false });
 
@@ -408,6 +408,7 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
             positions[i3 + 1],
             positions[i3 + 2]
           );
+          flyTargetIdx = bestIdx;
           flyProgress = 0;
           flyStartPos = camera.position.clone();
 
@@ -584,6 +585,7 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
 
     // --- Fly-to animation state ---
     let flyTarget: THREE.Vector3 | null = null;
+    let flyTargetIdx = -1; // tracked particle index
     let flyStartPos = new THREE.Vector3();
     let flyProgress = 0;
     const positions = sophonData.positions;
@@ -609,10 +611,22 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
 
     // --- Animation loop ---
     let frameCount = 0;
+    let gpuReadPending = false;
+    let gpuSynced = false; // true after first successful readback
+    let zoomVelocity = 0; // for smooth zoom deceleration
 
     const animate = () => {
       if (!hdrReady) return;
       frameCount++;
+
+      // Apply zoom velocity with damping (smooth deceleration)
+      if (Math.abs(zoomVelocity) > 0.0005) {
+        camera.position.multiplyScalar(1 + zoomVelocity);
+        camera.position.clampLength(10, 2000);
+        zoomVelocity *= 0.88; // damping factor
+      } else {
+        zoomVelocity = 0;
+      }
 
       const camDist = camera.position.length();
 
@@ -620,7 +634,8 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
       updateAttractorDrift(frameCount / 60);
 
       // Update GPU compute uniforms
-      speedFactorU.value = THREE.MathUtils.clamp(camDist / 1500, 0.15, 1);
+      speedFactorU.value = THREE.MathUtils.clamp(camDist / 1500, 0.01, 1);
+      cameraPosU.value.copy(camera.position);
       // Scale particles with camera distance: bigger when far away
       particleScaleU.value = Math.max(1.0, camDist / 500);
       mousePosU.value.copy(mouse3D);
@@ -629,25 +644,35 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
       // GPU particle compute
       renderer.compute(updateCompute);
 
-      // CPU shadow position update (for click detection & LOD)
-      const sf = speedFactorU.value;
-      const half = BOUNDARY_SPACE_SIZE / 2;
-      for (let i = 0; i < SOPHON_COUNT; i++) {
-        const i3 = i * 3;
-        positions[i3] += sophonData.velocities[i3] * sf;
-        positions[i3 + 1] += sophonData.velocities[i3 + 1] * sf;
-        positions[i3 + 2] += sophonData.velocities[i3 + 2] * sf;
-        for (let j = 0; j < 3; j++) {
-          if (positions[i3 + j] > half) positions[i3 + j] -= BOUNDARY_SPACE_SIZE;
-          if (positions[i3 + j] < -half) positions[i3 + j] += BOUNDARY_SPACE_SIZE;
-        }
+      // GPU→CPU position readback (always, for accurate LOD + click detection)
+      // Every frame when close, every 15 frames when far
+      const readInterval = camDist < LOD_SHOW_DIST * 2 ? 1 : 15;
+      if (!gpuReadPending && frameCount % readInterval === 0) {
+        gpuReadPending = true;
+        renderer.getArrayBufferAsync(posAttr).then((buf: ArrayBuffer) => {
+          const gpu = new Float32Array(buf);
+          // GPU buffer may have vec4 padding (4 floats per vertex instead of 3)
+          const stride = gpu.length / SOPHON_COUNT;
+          if (stride === 3) {
+            positions.set(gpu);
+          } else {
+            // Extract xyz from padded vec4 data
+            for (let i = 0; i < SOPHON_COUNT; i++) {
+              positions[i * 3]     = gpu[i * stride];
+              positions[i * 3 + 1] = gpu[i * stride + 1];
+              positions[i * 3 + 2] = gpu[i * stride + 2];
+            }
+          }
+          gpuReadPending = false;
+          gpuSynced = true;
+        }).catch((err: unknown) => { gpuReadPending = false; console.warn("GPU readback failed:", err); });
       }
 
       // Dynamic sprite scale
       particleScale.value = THREE.MathUtils.clamp(4 * (500 / camDist), 1, 20);
 
-      // --- LOD: show sphere instances when zoomed in ---
-      const showSpheres = camDist < LOD_SHOW_DIST;
+      // --- LOD: show sphere instances when zoomed in (only after GPU sync) ---
+      const showSpheres = camDist < LOD_SHOW_DIST && gpuSynced;
       instancedSophons.visible = showSpheres;
 
       if (showSpheres) {
@@ -714,16 +739,24 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
       }
 
       // --- Fly-to animation ---
-      if (flyTarget) {
-        flyProgress += 0.03;
+      if (flyTarget && flyTargetIdx >= 0) {
+        // Slow down all particles during flight so target doesn't drift away
+        speedFactorU.value *= 0.3;
+
+        // Track real particle position each frame
+        const ti3 = flyTargetIdx * 3;
+        flyTarget.set(positions[ti3], positions[ti3 + 1], positions[ti3 + 2]);
+
+        flyProgress += 0.02;
         const currentFlyTarget = flyTarget;
         if (flyProgress >= 1) {
           flyProgress = 1;
           flyTarget = null;
+          flyTargetIdx = -1;
         }
         const t = flyProgress * flyProgress * (3 - 2 * flyProgress); // smoothstep
         const targetCamPos = currentFlyTarget.clone().add(
-          new THREE.Vector3(0, 5, 25)
+          camera.position.clone().sub(currentFlyTarget).normalize().multiplyScalar(20)
         );
         camera.position.lerpVectors(flyStartPos, targetCamPos, t);
         camera.lookAt(currentFlyTarget);
