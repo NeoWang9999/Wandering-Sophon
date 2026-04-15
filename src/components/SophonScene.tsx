@@ -7,6 +7,15 @@ import * as THREE from "three/webgpu";
 import { storage, instanceIndex, Fn, float, vec3, vec4, uniform, uniformArray, hash, uint, mod, texture as tslTexture, uv, Loop, mix, smoothstep } from "three/tsl";
 import { RGBELoader } from "three/addons/loaders/RGBELoader.js";
 import {
+  AMBIENT_MASS, SPIN_STRENGTH, VELOCITY_DAMPING, MAX_SPEED, MOUSE_REPEL_RADIUS,
+  ATTRACTOR_POSITIONS, ATTRACTOR_AXES, ATTRACTOR_DRIFT_RADIUS, ATTRACTOR_DRIFT_SPEED,
+  FREEZE_RADIUS, MIN_SPEED_RATIO, LOCK_DISTANCE, FLOAT_SPEED, FLOAT_XY, FLOAT_Z, FLY_TO_SPEED,
+  LOD_SPHERE_COUNT, LOD_SHOW_DIST, LOD_FULL_DIST, SPHERE_RADIUS,
+  GLOW_TEXTURE_SIZE, GLOW_CORE_RATIO,
+  RESET_DURATION, RESET_CAMERA_POS,
+  CAMERA_RANGE, CAMERA_MOVE_SPEED, CAMERA_ROT_SPEED, CAMERA_BOOST, MOUSE_DRAG_SENSITIVITY,
+} from "@/lib/config";
+import {
   SOPHON_COUNT,
   DUST_COUNT,
   BOUNDARY_SPACE_SIZE,
@@ -33,10 +42,6 @@ function createGlowTexture(size: number, coreRatio: number): THREE.Texture {
   return texture;
 }
 
-const LOD_SPHERE_COUNT = 40;
-const LOD_SHOW_DIST = 150;
-const LOD_FULL_DIST = 60;
-const SPHERE_RADIUS = 3;
 
 export interface SophonSceneHandle {
   triggerClaim: (index: number) => void;
@@ -99,32 +104,28 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
     const sophonVelBuffer = storage(velAttr, "vec3", SOPHON_COUNT);
 
     // --- Permanent ambient attractors (create fluid flow) ---
-    const AMBIENT_COUNT = 3;
-    const ambientPositions = uniformArray([
-      new THREE.Vector3(-200, 80, -150),
-      new THREE.Vector3(180, -60, 200),
-      new THREE.Vector3(50, 150, -100),
-    ]);
-    const ambientAxes = uniformArray([
-      new THREE.Vector3(0.3, 0.9, 0.1).normalize(),
-      new THREE.Vector3(-0.5, 0.7, 0.4).normalize(),
-      new THREE.Vector3(0.2, -0.8, 0.6).normalize(),
-    ]);
+    const AMBIENT_COUNT = ATTRACTOR_POSITIONS.length;
+    const ambientPositions = uniformArray(
+      ATTRACTOR_POSITIONS.map(([x, y, z]) => new THREE.Vector3(x, y, z))
+    );
+    const ambientAxes = uniformArray(
+      ATTRACTOR_AXES.map(([x, y, z]) => new THREE.Vector3(x, y, z).normalize())
+    );
 
     // Uniforms for compute
     const speedFactorU = uniform(1.0);
     const particleScaleU = uniform(1.0);  // camera-distance based particle scale
     const spaceSizeF = float(BOUNDARY_SPACE_SIZE);
     const mousePosU = uniform(new THREE.Vector3(0, 0, 0));
-    const mouseRadiusF = float(80);
+    const mouseRadiusF = float(MOUSE_REPEL_RADIUS);
 
     // Shared physics params (direct force, no gravity constant)
-    const ambientMassU = uniform(8e3);
-    const spinStrengthU = uniform(2.5);
-    const velocityDampingU = uniform(0.08);
-    const maxSpeedU = uniform(35.0);
+    const ambientMassU = uniform(AMBIENT_MASS);
+    const spinStrengthU = uniform(SPIN_STRENGTH);
+    const velocityDampingU = uniform(VELOCITY_DAMPING);
+    const maxSpeedU = uniform(MAX_SPEED);
     const cameraPosU = uniform(new THREE.Vector3(0, 0, 500));
-    const freezeRadiusSqU = float(500 * 500); // squared distance for freeze zone
+    const freezeRadiusSqU = float(FREEZE_RADIUS * FREEZE_RADIUS); // squared distance for freeze zone
     const lockedIdxU = uniform(-1); // index of locked particle (-1 = none)
 
     // Shift+click temporary attractor
@@ -200,7 +201,7 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
       // Per-particle freeze near camera (GPU-side, zero CPU cost)
       const toCam = cameraPosU.sub(pos);
       const camDistSq = toCam.dot(toCam);
-      const localSpeed = smoothstep(freezeRadiusSqU.mul(0.05), freezeRadiusSqU, camDistSq).max(0.03);
+      const localSpeed = smoothstep(freezeRadiusSqU.mul(0.05), freezeRadiusSqU, camDistSq).max(MIN_SPEED_RATIO);
       // Freeze only the locked particle
       const isLocked = float(instanceIndex.equal(uint(lockedIdxU)));
       const finalSpeed = localSpeed.mul(float(1.0).sub(isLocked));
@@ -216,11 +217,12 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
       // Boundary wrap
       const halfSpace = spaceSizeF.div(2.0);
       pos.assign(mod(pos.add(halfSpace), spaceSizeF).sub(halfSpace));
+
     });
     const updateCompute = updateSophons().compute(SOPHON_COUNT);
 
     // Sophon sprite material
-    const glowTex = createGlowTexture(256, 0.15);
+    const glowTex = createGlowTexture(GLOW_TEXTURE_SIZE, GLOW_CORE_RATIO);
     const particleScale = uniform(1.0);
     const sophonMaterial = new (THREE as any).SpriteNodeMaterial({
       transparent: true,
@@ -472,11 +474,11 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
       prevMouse = { x: e.clientX, y: e.clientY };
       if (lockedIdx >= 0) {
         // Orbit around locked particle
-        rotateFlyDir(dx * 0.003, dy * 0.003);
+        rotateFlyDir(dx * MOUSE_DRAG_SENSITIVITY, dy * MOUSE_DRAG_SENSITIVITY);
       } else {
         _euler.setFromQuaternion(camera.quaternion);
-        _euler.y -= dx * 0.003;
-        _euler.x -= dy * 0.003;
+        _euler.y -= dx * MOUSE_DRAG_SENSITIVITY;
+        _euler.x -= dy * MOUSE_DRAG_SENSITIVITY;
         _euler.x = Math.max(-Math.PI / 2 + 0.01, Math.min(Math.PI / 2 - 0.01, _euler.x));
         camera.quaternion.setFromEuler(_euler);
       }
@@ -488,16 +490,8 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
 
     // --- Debug: attractor visualizers ---
     const ATTRACTOR_COLORS = [0xff4444, 0x44ff44, 0x4488ff];
-    const attractorPosData = [
-      new THREE.Vector3(-200, 80, -150),
-      new THREE.Vector3(180, -60, 200),
-      new THREE.Vector3(50, 150, -100),
-    ];
-    const attractorAxisData = [
-      new THREE.Vector3(0.3, 0.9, 0.1).normalize(),
-      new THREE.Vector3(-0.5, 0.7, 0.4).normalize(),
-      new THREE.Vector3(0.2, -0.8, 0.6).normalize(),
-    ];
+    const attractorPosData = ATTRACTOR_POSITIONS.map(([x, y, z]) => new THREE.Vector3(x, y, z));
+    const attractorAxisData = ATTRACTOR_AXES.map(([x, y, z]) => new THREE.Vector3(x, y, z).normalize());
     // Debug group: not added to scene until toggled on (WebGPU compat)
     const debugGroup = new THREE.Group();
     let debugInScene = false;
@@ -515,8 +509,8 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
     let debugVisible = false;
 
     // Attractor auto-drift: each attractor orbits its origin via Lissajous curves
-    const driftRadius = 150;   // max drift distance from origin
-    const driftSpeed = 0.15;   // base angular speed (radians/sec)
+    const driftRadius = ATTRACTOR_DRIFT_RADIUS;
+    const driftSpeed = ATTRACTOR_DRIFT_SPEED;
     // Per-attractor frequency ratios for organic, non-repeating paths
     const driftFreqs = [
       { fx: 1.0, fy: 0.7, fz: 0.4 },
@@ -612,6 +606,27 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
         console.log(`Attractor mode: ${MODE_NAMES[currentMode]}`);
         return;
       }
+      if (e.key === "o" || e.key === "O") {
+        if (resetting) return; // already resetting
+        // Exit lock mode
+        if (lockedIdx >= 0) {
+          lockedIdx = -1;
+          onSophonClickRef.current?.(-1);
+        }
+        flyTarget = null;
+        flyTargetIdx = -1;
+        // Snapshot current positions & generate targets
+        resetStartPositions = new Float32Array(positions);
+        resetTargetPositions = createSophonData().positions;
+        // Start reset animation
+        resetting = true;
+        resetProgress = 0;
+        resetCamStart.copy(camera.position);
+        const lookDir = new THREE.Vector3();
+        camera.getWorldDirection(lookDir);
+        resetCamLookStart.copy(camera.position).add(lookDir);
+        return;
+      }
       if (e.key === "`") {
         debugVisible = !debugVisible;
         if (debugVisible) {
@@ -642,8 +657,17 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
     let flyStartLookAt = new THREE.Vector3(); // lookAt target at start of flight
     let flyProgress = 0;
     let lockedIdx = -1; // locked close-up particle index (-1 = free camera)
-    const LOCK_DISTANCE = 15; // camera distance from particle in lock mode
     const positions = sophonData.positions;
+
+    // --- Reset state (O key) ---
+    let resetting = false;
+    let resetProgress = 0;
+    let resetCamStart = new THREE.Vector3();
+    let resetCamLookStart = new THREE.Vector3();
+    const resetCamEnd = new THREE.Vector3(...RESET_CAMERA_POS);
+    const resetLookEnd = new THREE.Vector3(0, 0, 0);
+    let resetStartPositions: Float32Array | null = null; // snapshot at start
+    let resetTargetPositions: Float32Array | null = null; // new random targets
 
     // --- Claim animation state ---
     let claimAnimIdx = -1;
@@ -685,9 +709,9 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
       }
 
       // WASDQE movement
-      if (!flyTarget) {
-        const boost = keysPressed.has(' ') ? 5.0 : 1.0;
-        const rotSpeed = 0.02 * boost;
+      if (!flyTarget && !resetting) {
+        const boost = keysPressed.has(' ') ? CAMERA_BOOST : 1.0;
+        const rotSpeed = CAMERA_ROT_SPEED * boost;
         if (lockedIdx >= 0) {
           // Orbit around locked particle with WASD
           if (keysPressed.has('a')) rotateFlyDir(-rotSpeed, 0);
@@ -703,7 +727,7 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
             camera.up.applyQuaternion(_qRot).normalize();
           }
         } else {
-          const moveSpeed = 2.0 * boost;
+          const moveSpeed = CAMERA_MOVE_SPEED * boost;
           const fwd = new THREE.Vector3();
           camera.getWorldDirection(fwd);
           const right = new THREE.Vector3();
@@ -737,6 +761,8 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
         }
       }
 
+      // Clamp camera within range
+      camera.position.clampLength(0, CAMERA_RANGE);
       const camDist = camera.position.length();
 
       // Drift ambient attractors along Lissajous paths
@@ -847,13 +873,56 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
         }
       }
 
+      // --- Reset animation (O key) ---
+      if (resetting && resetStartPositions && resetTargetPositions) {
+        resetProgress++;
+        const t = Math.min(resetProgress / RESET_DURATION, 1);
+        const eased = t * t * (3 - 2 * t); // smoothstep
+        // Lerp camera
+        camera.position.lerpVectors(resetCamStart, resetCamEnd, eased);
+        const currentLookAt = resetCamLookStart.clone().lerp(resetLookEnd, eased);
+        camera.lookAt(currentLookAt);
+        // CPU lerp particle positions and write to GPU buffer (vec4 padded)
+        const posArr = posAttr.array as Float32Array;
+        const stride = posArr.length / SOPHON_COUNT; // 3 or 4
+        for (let i = 0; i < SOPHON_COUNT; i++) {
+          const s = i * 3; // source index (vec3)
+          const d = i * stride; // dest index (vec3 or vec4)
+          posArr[d]     = resetStartPositions[s]     + (resetTargetPositions[s]     - resetStartPositions[s])     * eased;
+          posArr[d + 1] = resetStartPositions[s + 1] + (resetTargetPositions[s + 1] - resetStartPositions[s + 1]) * eased;
+          posArr[d + 2] = resetStartPositions[s + 2] + (resetTargetPositions[s + 2] - resetStartPositions[s + 2]) * eased;
+          // Update CPU readback array
+          positions[s]     = posArr[d];
+          positions[s + 1] = posArr[d + 1];
+          positions[s + 2] = posArr[d + 2];
+        }
+        posAttr.needsUpdate = true;
+        // Zero velocities during reset
+        speedFactorU.value = 0;
+        if (t >= 1) {
+          resetting = false;
+          resetStartPositions = null;
+          resetTargetPositions = null;
+          // Reset velocities
+          const newVel = createSophonData().velocities;
+          const velArr = velAttr.array as Float32Array;
+          const vStride = velArr.length / SOPHON_COUNT;
+          for (let i = 0; i < SOPHON_COUNT; i++) {
+            velArr[i * vStride]     = newVel[i * 3];
+            velArr[i * vStride + 1] = newVel[i * 3 + 1];
+            velArr[i * vStride + 2] = newVel[i * 3 + 2];
+          }
+          velAttr.needsUpdate = true;
+        }
+      }
+
       // --- Fly-to animation ---
       if (flyTarget && flyTargetIdx >= 0) {
         // Track real particle position each frame
         const ti3 = flyTargetIdx * 3;
         flyTarget.set(positions[ti3], positions[ti3 + 1], positions[ti3 + 2]);
 
-        flyProgress += 0.02;
+        flyProgress += FLY_TO_SPEED;
         const t = Math.min(flyProgress, 1);
         const eased = t * t * (3 - 2 * t); // smoothstep
         const targetCamPos = flyTarget.clone().add(flyDir.clone().multiplyScalar(LOCK_DISTANCE));
@@ -872,11 +941,11 @@ const SophonScene = forwardRef<SophonSceneHandle, SophonSceneProps>(
         const li3 = lockedIdx * 3;
         const lockPos = new THREE.Vector3(positions[li3], positions[li3 + 1], positions[li3 + 2]);
         // Gentle floating motion for the close-up
-        const ft = frameCount * 0.015;
+        const ft = frameCount * FLOAT_SPEED;
         const floatOffset = new THREE.Vector3(
-          Math.sin(ft) * 0.3,
-          Math.sin(ft * 0.7 + 1.0) * 0.3,
-          Math.sin(ft * 0.5 + 2.0) * 0.15
+          Math.sin(ft) * FLOAT_XY,
+          Math.sin(ft * 0.7 + 1.0) * FLOAT_XY,
+          Math.sin(ft * 0.5 + 2.0) * FLOAT_Z
         );
         const animPos = lockPos.clone().add(floatOffset);
         camera.position.copy(animPos.clone().add(flyDir.clone().multiplyScalar(LOCK_DISTANCE)));

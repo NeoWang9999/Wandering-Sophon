@@ -1,9 +1,8 @@
 import * as THREE from "three";
+import { SOPHON_COUNT, DUST_COUNT, INIT_SPACE_SIZE, INITIAL_VELOCITY } from "./config";
 
-export const SOPHON_COUNT = 5000;
-export const DUST_COUNT = 100000;
-export const INIT_SPACE_SIZE = 2000;      // particle initial spawn range
-export const BOUNDARY_SPACE_SIZE = 3000;  // wrap-around boundary size
+export { SOPHON_COUNT, DUST_COUNT, INIT_SPACE_SIZE } from "./config";
+export { BOUNDARY_SPACE_SIZE } from "./config";
 
 export interface SophonState {
   positions: Float32Array;
@@ -26,9 +25,9 @@ export function createSophonData(): SophonState {
     positions[i3 + 1] = (Math.random() - 0.5) * INIT_SPACE_SIZE;
     positions[i3 + 2] = (Math.random() - 0.5) * INIT_SPACE_SIZE;
 
-    velocities[i3] = (Math.random() - 0.5) * 0.3;
-    velocities[i3 + 1] = (Math.random() - 0.5) * 0.3;
-    velocities[i3 + 2] = (Math.random() - 0.5) * 0.3;
+    velocities[i3] = (Math.random() - 0.5) * INITIAL_VELOCITY;
+    velocities[i3 + 1] = (Math.random() - 0.5) * INITIAL_VELOCITY;
+    velocities[i3 + 2] = (Math.random() - 0.5) * INITIAL_VELOCITY;
 
     const brightness = 0.5 + Math.random() * 0.5;
     colors[i3] = 0.6 * brightness;
